@@ -1,0 +1,28 @@
+# Transcript scraping — YouTube
+youtube-transcript-api>=0.6.2
+
+# Transcript scraping — HTML podcast sites
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0          # faster HTML parser for BeautifulSoup
+
+# Google Docs
+google-api-python-client>=2.120.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+
+# AI Analysis
+anthropic>=0.40.0
+
+# Notion output
+notion-client>=2.2.1
+
+# Resilience & utilities
+tenacity>=8.2.3
+python-dotenv>=1.0.0
+click>=8.1.7
+rich>=13.7.0
+
+# Testing
+pytest>=8.0.0
+pytest-mock>=3.12.0
