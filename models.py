@@ -42,15 +42,61 @@ class HeadingAnchor:
 class AnnotatedSegment:
     text: str
     annotation_type: str            # "highlight" | "underline"
-    paragraph_index: int            # position in doc body
+    paragraph_index: int
     nearest_anchor: Optional[HeadingAnchor] = None
 
 
+# ── Report dataclasses ────────────────────────────────────────────────────────
+
 @dataclass
-class ReportSection:
+class SourceMetadata:
+    show: str = ""
+    guests: list[str] = field(default_factory=list)
+    host: str = ""
+    source: str = ""                # matches Notion Source select
+    tags: list[str] = field(default_factory=list)
+    eval_metric: str = ""           # matches Notion Eval Metric select
+    action: str = ""                # matches Notion Action select
+    output: list[str] = field(default_factory=list)  # matches Notion Output multi_select
+    core_insight: str = ""
+    why_it_matters: str = ""
+
+
+@dataclass
+class ConceptCard:
+    concept: str
+    explanation: str
+
+
+@dataclass
+class ChapterTopic:
     title: str
-    body: str
-    anchors: list[HeadingAnchor] = field(default_factory=list)
+    key_quote: str = ""
+    related_concept: str = ""
+    why_it_matters: str = ""
+    factual_anchor: str = ""
+
+
+@dataclass
+class Chapter:
+    start: str                      # e.g. "00:00"
+    end: str                        # e.g. "10:00"
+    title: str
+    summary: str                    # 2 sentences
+    topics: list[ChapterTopic] = field(default_factory=list)
+
+
+@dataclass
+class KeyInsight:
+    timestamp: str
+    quote: str
+    insight: str
+
+
+@dataclass
+class HostQuestion:
+    question: str
+    category: str                   # product | leadership | technical | personal | industry | process
 
 
 @dataclass
@@ -58,11 +104,12 @@ class AnalysisReport:
     podcast_title: str
     source_url: str
     doc_url: str
-    executive_summary: str
-    key_themes: list[ReportSection] = field(default_factory=list)
-    resonance_points: list[ReportSection] = field(default_factory=list)  # from human annotations
-    synthesis: str = ""
-    action_items: list[str] = field(default_factory=list)
+    source_metadata: SourceMetadata
+    episode_summary: str
+    concept_map: list[ConceptCard] = field(default_factory=list)
+    chapter_breakdown: list[Chapter] = field(default_factory=list)
+    key_insights: list[KeyInsight] = field(default_factory=list)
+    host_questions: list[HostQuestion] = field(default_factory=list)
 
 
 @dataclass

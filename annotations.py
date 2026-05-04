@@ -46,8 +46,18 @@ def _is_underlined(text_style: dict) -> bool:
 
 
 def _build_docs_service():
-    creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "./credentials/google_service_account.json")
-    creds = service_account.Credentials.from_service_account_file(creds_path, scopes=SCOPES)
+    oauth_path = os.environ.get("GOOGLE_OAUTH_CREDENTIALS")
+    if oauth_path and os.path.exists(oauth_path):
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        creds = Credentials.from_authorized_user_file(oauth_path, SCOPES)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(oauth_path, "w") as f:
+                f.write(creds.to_json())
+    else:
+        creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "./credentials/google_service_account.json")
+        creds = service_account.Credentials.from_service_account_file(creds_path, scopes=SCOPES)
     return build("docs", "v1", credentials=creds)
 
 
