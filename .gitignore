@@ -18,3 +18,5 @@ venv/
 
 # OS
 .DS_Store
+
+evals/

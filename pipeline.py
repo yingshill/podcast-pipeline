@@ -29,6 +29,7 @@ import gdocs
 import annotations as ann_mod
 import analyzer
 import notion_writer
+import eval_metrics
 import state as state_mod
 from models import PipelineJob, PipelineStatus
 
@@ -169,6 +170,12 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
 
     console.print(f"[green]✓ Notion report created:[/green] {page_url}")
 
+    eval_metrics.collect_eval(
+        job_id=job.id,
+        notion_url=page_url,
+        source_url=job.url,
+    )
+
 
 def _title_from_url(url: str) -> str:
     # Best-effort: extract something readable from the URL
@@ -296,6 +303,44 @@ def scrape(url: str):
         state_mod.save_job(job)
         console.print(f"[red]{exc}[/red]")
         raise SystemExit(1)
+
+
+@cli.command("analyze-doc")
+@click.argument("doc_id")
+@click.option("--url", default="", help="Source URL for metadata (optional)")
+@click.option("--title", default="", help="Episode title (optional)")
+def analyze_doc(doc_id: str, url: str, title: str):
+    """Run analyze + Notion report stages on an existing Google Doc."""
+    doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
+    podcast_title = title or f"Podcast — {doc_id[:12]}"
+    source_url = url or doc_url
+
+    job = state_mod.create_job(source_url)
+    job.doc_id = doc_id
+    job.doc_url = doc_url
+    job.status = PipelineStatus.DOC_CREATED
+    state_mod.save_job(job)
+
+    console.print(f"\n[bold cyan]Analyze-doc job:[/bold cyan] {job.id}")
+    console.print(f"Doc: {doc_url}\n")
+
+    try:
+        stage_analyze_and_report(job)
+    except Exception as exc:
+        job.status = PipelineStatus.FAILED
+        job.error = str(exc)
+        state_mod.save_job(job)
+        console.print(f"\n[red]Failed:[/red] {exc}")
+        raise SystemExit(1)
+
+    console.rule("[bold green]Complete[/bold green]")
+    console.print(f"Notion report: {job.notion_page_url}\n")
+
+
+@cli.command("eval-history")
+def eval_history():
+    """Show eval scores across all past report runs."""
+    eval_metrics.print_history()
 
 
 def _print_job(job: PipelineJob) -> None:
