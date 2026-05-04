@@ -28,6 +28,7 @@ from youtube_transcript_api import (
 )
 
 from models import TranscriptSegment
+from cleaner import clean_segments
 
 log = logging.getLogger(__name__)
 
@@ -79,11 +80,14 @@ def transcribe(url: str) -> tuple[list[TranscriptSegment], str]:
     if vid:
         log.info("YouTube URL detected — fetching captions for %s", vid)
         segments = _scrape_youtube(vid)
-        return segments, "youtube"
+    else:
+        log.info("Podcast URL detected — scraping HTML transcript from %s", url)
+        segments = _scrape_html(url)
 
-    log.info("Podcast URL detected — scraping HTML transcript from %s", url)
-    segments = _scrape_html(url)
-    return segments, "html"
+    source = "youtube" if vid else "html"
+    cleaned = clean_segments(segments)
+    log.info("Cleaning: %d → %d segments (removed %d)", len(segments), len(cleaned), len(segments) - len(cleaned))
+    return cleaned, source
 
 
 # ── YouTube ───────────────────────────────────────────────────────────────────
