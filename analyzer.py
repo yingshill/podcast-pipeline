@@ -10,7 +10,10 @@ import logging
 import os
 
 import anthropic
+from rich.console import Console as _Console
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+_console = _Console()
 
 from models import (
     AnnotatedSegment, AnalysisReport, HeadingAnchor,
@@ -35,10 +38,13 @@ You receive:
 ━━━ SECTION RULES ━━━
 
 source_metadata
-  Infer show, guest(s), host, and episode title from the podcast title and annotation content.
-  - episode_title: the full episode title (infer from annotations if not obvious from the podcast_title input)
-  - tags: pick 1–3 most relevant from this exact list:
-      agents | llm-infra | rag | eval | data-tools | skills | observability
+  Use Episode Metadata (scraped from the source URL, provided below) as the primary source for
+  show, guest(s), host, and episode title. Fall back to annotation content when metadata is absent.
+  - episode_title: prefer jsonld_name or og_title; otherwise infer from annotations
+  - show: prefer og_site_name or jsonld_series; otherwise infer from annotation content
+  - guests: extract from jsonld_name / og_title (text before/after "with" or "|"); verify via annotations
+  - tags: pick 1–3 from Available Notion Tags if they fit; otherwise create a new concise
+          lowercase hyphenated tag (e.g. "product-strategy"). Notion creates new options automatically.
   - eval_metric: your honest assessment, pick exactly one from this exact list:
       🔥 Game Changer | 🧐 Interesting | 💤 Too Basic | 🗑️ Irrelevant | Good to know | ✅ Strong | 🛌 Sleep on it | ❓ Need more context | 👀 Watchlist
   - action: what the reader should do next, pick exactly one from this exact list:
@@ -89,6 +95,8 @@ host_questions
   Extract all notable questions the host asked during the interview.
   Assign each a category from this list:
       product | leadership | technical | personal | industry | process
+  For each question, write a short answer (2–3 sentences) as the guest answered it,
+  based strictly on what was discussed in the annotations and context.
 
 connections
   If a list of recent entries is provided, identify 1–3 that genuinely connect to this episode.
@@ -99,7 +107,8 @@ connections
 
 ━━━ CONSTRAINTS ━━━
 - Return ONLY valid JSON. No markdown fences, no commentary outside the JSON.
-- Values for source, tags, eval_metric, action, output MUST be chosen from the exact lists above.
+- eval_metric, action, and output MUST be chosen from the exact lists above.
+- show and tags MAY use existing options from the provided lists OR new values — Notion creates them automatically.
 - Do not fabricate quotes, stats, or claims not present in the provided text.
 - Chapters with no annotations: infer topics from the context clues available.
 - Keep all text concise — this is a reference document, not an essay.
@@ -144,7 +153,7 @@ connections
     {"timestamp": "", "quote": "", "insight": ""}
   ],
   "host_questions": [
-    {"question": "", "category": ""}
+    {"question": "", "category": "", "answer": ""}
   ],
   "connections": [
     {"title": "", "relationship": "", "reason": ""}
@@ -161,6 +170,9 @@ def _build_user_message(
     all_anchors: list[HeadingAnchor],
     topic_hub_names: list[str] | None = None,
     recent_entries: list[dict] | None = None,
+    episode_metadata: dict | None = None,
+    source_options: list[str] | None = None,
+    tags_options: list[str] | None = None,
 ) -> str:
     parts = [
         f"## Podcast: {podcast_title}",
@@ -172,6 +184,19 @@ def _build_user_message(
     for i, anchor in enumerate(all_anchors):
         end_label = all_anchors[i + 1].label if i + 1 < len(all_anchors) else "end"
         parts.append(f"  {anchor.label} – {end_label}")
+
+    if episode_metadata:
+        parts += ["", "## Episode Metadata (scraped from source URL)"]
+        for k, v in episode_metadata.items():
+            parts.append(f"  {k}: {v}")
+
+    if source_options:
+        parts += ["", "## Available Notion Source Options (pick closest or use correct show name)"]
+        parts.append(", ".join(source_options))
+
+    if tags_options:
+        parts += ["", "## Available Notion Tags (pick 1–3 or create new concise lowercase tag)"]
+        parts.append(", ".join(tags_options))
 
     if topic_hub_names:
         parts += [
@@ -240,6 +265,9 @@ def analyze(
     all_anchors: list[HeadingAnchor],
     topic_hub: dict[str, str] | None = None,
     recent_entries: list[dict] | None = None,
+    episode_metadata: dict | None = None,
+    source_options: list[str] | None = None,
+    tags_options: list[str] | None = None,
 ) -> AnalysisReport:
     if not annotated:
         raise ValueError(
@@ -251,8 +279,12 @@ def analyze(
     user_msg = _build_user_message(
         podcast_title, source_url, annotated, context_map, all_anchors,
         topic_hub_names, recent_entries,
+        episode_metadata=episode_metadata,
+        source_options=source_options,
+        tags_options=tags_options,
     )
-    raw = _call_claude(user_msg)
+    with _console.status("[dim]Analyzing with Claude…[/dim]", spinner="dots"):
+        raw = _call_claude(user_msg)
 
     raw = raw.strip()
     if raw.startswith("```"):
@@ -310,7 +342,7 @@ def analyze(
     ]
 
     host_questions = [
-        HostQuestion(question=q["question"], category=q["category"])
+        HostQuestion(question=q["question"], category=q["category"], answer=q.get("answer", ""))
         for q in data.get("host_questions", [])
     ]
 
@@ -331,6 +363,9 @@ def analyze(
         host_questions=host_questions,
         connections=connections,
     )
+
+    if not chapter_breakdown:
+        log.warning("Claude returned 0 chapters — transcript may have no anchor timestamps or Claude truncated the response")
 
     log.info(
         "Analysis complete: %d chapters, %d insights, %d concepts, %d host questions",

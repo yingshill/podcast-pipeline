@@ -15,7 +15,10 @@ from notion_client import Client
 from notion_client.errors import APIResponseError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from models import AnalysisReport, Chapter, ConceptCard, KeyInsight, HostQuestion, Connection
+from models import (
+    AnalysisReport, Chapter, ConceptCard, KeyInsight, HostQuestion, Connection,
+    SynthesisReport,
+)
 
 log = logging.getLogger(__name__)
 
@@ -166,14 +169,6 @@ def _consumption_guide() -> list[dict]:
     return [_callout(guide, "⏱️", color="blue_background"), _divider()]
 
 
-def _transcript_section(doc_url: str) -> list[dict]:
-    return [
-        _h("📋 Transcript", level=1),
-        _paragraph([_rt("Open transcript: "), _rt(doc_url, url=doc_url)]),
-        _divider(),
-    ]
-
-
 def _episode_summary_section(summary: str) -> list[dict]:
     return [_h("📖 Episode Summary", level=2)] + _paragraphs(summary) + [_divider()]
 
@@ -252,10 +247,10 @@ def _key_insights_section(insights: list[KeyInsight]) -> list[dict]:
 
 
 def _host_questions_section(questions: list[HostQuestion]) -> list[dict]:
-    rows = [[q.question, q.category] for q in questions]
+    rows = [[q.question, q.category, q.answer or "—"] for q in questions]
     return [
         _h("Host Question List and Category", level=2),
-        _table(["Question", "Category"], rows),
+        _table(["Question", "Category", "Answer 🤖"], rows),
         _divider(),
     ]
 
@@ -334,6 +329,7 @@ def _build_properties(report: AnalysisReport, topic_hub: dict[str, str] | None =
     props: dict = {
         "Title": {"title": [{"text": {"content": report.podcast_title}}]},
         "URL": {"url": report.source_url},
+        "Transcript": {"url": report.doc_url},
     }
     if meta.show:
         props["Source"] = {"select": {"name": meta.show}}
@@ -343,7 +339,7 @@ def _build_properties(report: AnalysisReport, topic_hub: dict[str, str] | None =
         props["Eval Metric"] = {"select": {"name": meta.eval_metric}}
     if meta.action:
         props["Action"] = {"select": {"name": meta.action}}
-    output_vals = meta.output if meta.output else ["Report"]
+    output_vals = list(dict.fromkeys(["Report"] + (meta.output or [])))
     props["Output"] = {"multi_select": [{"name": o} for o in output_vals]}
     if meta.core_insight:
         props["Core Insight"] = {"rich_text": [{"text": {"content": meta.core_insight[:2000]}}]}
@@ -398,6 +394,27 @@ def _append_blocks(client: Client, page_id: str, children: list[dict]) -> None:
     client.blocks.children.append(block_id=page_id, children=children)
 
 
+def fetch_db_options() -> dict[str, list[str]]:
+    """Return existing select/multi_select option names from the podcast DB schema."""
+    client = _client()
+    db_id = os.environ.get("NOTION_PODCAST_ID", "")
+    if not db_id:
+        return {}
+    try:
+        db = client.databases.retrieve(database_id=db_id)
+    except Exception as exc:
+        log.warning("Could not fetch DB options: %s", exc)
+        return {}
+    options: dict[str, list[str]] = {}
+    for prop_name, prop_data in db.get("properties", {}).items():
+        ptype = prop_data.get("type")
+        if ptype == "select":
+            options[prop_name] = [o["name"] for o in prop_data.get("select", {}).get("options", [])]
+        elif ptype == "multi_select":
+            options[prop_name] = [o["name"] for o in prop_data.get("multi_select", {}).get("options", [])]
+    return options
+
+
 def fetch_notion_context() -> tuple[dict[str, str], list[dict]]:
     """Single paginated search returning (topic_hub, recent_podcast_entries).
 
@@ -446,8 +463,174 @@ def fetch_notion_context() -> tuple[dict[str, str], list[dict]]:
     return topic_hub, podcast_entries
 
 
-def write_report(report: AnalysisReport, topic_hub: dict[str, str] | None = None) -> tuple[str, str]:
-    """Creates a Notion page and returns (page_id, page_url)."""
+def fetch_recent_episodes(weeks: int = 1) -> list[dict]:
+    """Query the podcast DB for pages created in the last N weeks.
+
+    Returns list of dicts with: title, show, core_insight, why_it_matters, tags, url, page_id.
+    """
+    from datetime import datetime, timedelta, timezone
+    client = _client()
+    db_id = os.environ.get("NOTION_PODCAST_ID", "")
+    if not db_id:
+        raise EnvironmentError("NOTION_PODCAST_ID not set")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(weeks=weeks)
+    db_id_norm = db_id.replace("-", "")
+    episodes: list[dict] = []
+    cursor = None
+
+    while True:
+        kwargs: dict = {"page_size": 100}
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        results = client.search(**kwargs)
+
+        for r in results.get("results", []):
+            if r.get("object") != "page":
+                continue
+            parent = r.get("parent", {})
+            ptype = parent.get("type", "")
+            parent_db = parent.get("database_id", parent.get("data_source_id", "")).replace("-", "")
+            if ptype not in ("database_id", "data_source_id") or parent_db != db_id_norm:
+                continue
+            created_str = r.get("created_time", "")
+            if not created_str:
+                continue
+            created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            if created < cutoff:
+                continue
+            props = r.get("properties", {})
+
+            title_parts = props.get("Title", {}).get("title", [])
+            title = title_parts[0].get("plain_text", "") if title_parts else ""
+            if not title:
+                continue
+
+            ci_parts = props.get("Core Insight", {}).get("rich_text", [])
+            core_insight = ci_parts[0].get("plain_text", "") if ci_parts else ""
+
+            wim_parts = props.get("Why It Matters", {}).get("rich_text", [])
+            why_it_matters = wim_parts[0].get("plain_text", "") if wim_parts else ""
+
+            source = (props.get("Source", {}).get("select") or {})
+            show = source.get("name", "")
+
+            tags = [t["name"] for t in props.get("Tags", {}).get("multi_select", [])]
+            url = props.get("URL", {}).get("url", "") or ""
+
+            episodes.append({
+                "title": title,
+                "show": show,
+                "core_insight": core_insight,
+                "why_it_matters": why_it_matters,
+                "tags": tags,
+                "url": url,
+                "page_id": r["id"],
+            })
+
+        if not results.get("has_more"):
+            break
+        cursor = results.get("next_cursor")
+
+    log.info("Fetched %d episodes from last %d week(s)", len(episodes), weeks)
+    return episodes
+
+
+def _build_synthesis_blocks(synthesis: SynthesisReport) -> list[dict]:
+    blocks: list[dict] = []
+
+    blocks.append(_callout(synthesis.throughline, "🧵", color="purple_background"))
+    blocks.append(_divider())
+
+    blocks.append(_h("📅 Episodes This Period", level=2))
+    for title in synthesis.episodes_covered:
+        blocks.append(_bullet(title))
+    blocks.append(_divider())
+
+    if synthesis.cross_themes:
+        blocks.append(_h("🔁 Cross-Episode Themes", level=2))
+        for theme in synthesis.cross_themes:
+            eps_str = ", ".join(theme.episodes)
+            children = [
+                _paragraph([_rt(f"Appears in: {eps_str}", italic=True)]),
+                *_paragraphs(theme.synthesis),
+            ]
+            blocks.append(_toggle(theme.theme, children))
+        blocks.append(_divider())
+
+    if synthesis.recurring_claims:
+        blocks.append(_h("💬 Recurring Claims", level=2))
+        blocks.append(_paragraph([_rt(
+            "Claims multiple speakers made independently, across different episodes."
+        )]))
+        for claim in synthesis.recurring_claims:
+            blocks.append(_bullet(claim.claim))
+            blocks.append(_bullet(f"In: {', '.join(claim.episodes)}"))
+            if claim.why_it_matters:
+                blocks.append(_bullet(f"Why this convergence matters: {claim.why_it_matters}"))
+        blocks.append(_divider())
+
+    if synthesis.open_questions:
+        blocks.append(_h("❓ Open Questions", level=2))
+        blocks.append(_paragraph([_rt(
+            "What the episodes collectively raise but don't resolve."
+        )]))
+        for q in synthesis.open_questions:
+            blocks.append(_bullet(q.question))
+            if q.context:
+                blocks.append(_bullet(f"Context: {q.context}"))
+        blocks.append(_divider())
+
+    if synthesis.distilled_actions:
+        blocks.append(_h("⚡ Distilled Actions", level=2))
+        blocks.append(_paragraph([_rt(
+            "Best 'try this' items distilled from across all episodes."
+        )]))
+        for action in synthesis.distilled_actions:
+            blocks.append(_todo(action))
+
+    return blocks
+
+
+def write_synthesis(synthesis: SynthesisReport) -> tuple[str, str]:
+    """Creates a child page under NOTION_SYNTHESIS_PAGE_ID and returns (page_id, page_url)."""
+    parent_id = os.environ.get("NOTION_SYNTHESIS_PAGE_ID")
+    if not parent_id:
+        raise EnvironmentError(
+            "NOTION_SYNTHESIS_PAGE_ID not set. "
+            "Create a page in Notion for syntheses, copy its ID, and add it to .env."
+        )
+
+    client = _client()
+    title = f"Synthesis — {synthesis.date_range} ({synthesis.episode_count} episodes)"
+    blocks = _build_synthesis_blocks(synthesis)
+
+    page = client.pages.create(
+        parent={"page_id": parent_id},
+        properties={"title": {"title": [{"text": {"content": title}}]}},
+        children=blocks[:100],
+    )
+    page_id: str = page["id"]
+    page_url: str = page.get("url", f"https://notion.so/{page_id.replace('-', '')}")
+
+    for i in range(100, len(blocks), 100):
+        _append_blocks(client, page_id, blocks[i: i + 100])
+
+    log.info("Synthesis page created: %s (%d blocks)", page_url, len(blocks))
+    return page_id, page_url
+
+
+def write_report(
+    report: AnalysisReport,
+    topic_hub: dict[str, str] | None = None,
+    on_page_created=None,
+) -> tuple[str, str]:
+    """Creates a Notion page and returns (page_id, page_url).
+
+    on_page_created: optional callable(page_id, page_url) fired right after the page
+    is created and before block appending begins — lets callers persist the page_id
+    so a failed append can be diagnosed rather than lost.
+    """
     db_id = os.environ.get("NOTION_PODCAST_ID")
     if not db_id:
         raise EnvironmentError("NOTION_PODCAST_ID not set")
@@ -459,6 +642,9 @@ def write_report(report: AnalysisReport, topic_hub: dict[str, str] | None = None
     page = _create_page(client, db_id, properties, all_blocks[:100])
     page_id: str = page["id"]
     page_url: str = page.get("url", f"https://notion.so/{page_id.replace('-', '')}")
+
+    if on_page_created:
+        on_page_created(page_id, page_url)
 
     for i in range(100, len(all_blocks), 100):
         _append_blocks(client, page_id, all_blocks[i: i + 100])

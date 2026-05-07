@@ -98,6 +98,7 @@ class KeyInsight:
 class HostQuestion:
     question: str
     category: str                   # product | leadership | technical | personal | industry | process
+    answer: str = ""                # short AI-generated answer
 
 
 @dataclass
@@ -119,6 +120,40 @@ class AnalysisReport:
     key_insights: list[KeyInsight] = field(default_factory=list)
     host_questions: list[HostQuestion] = field(default_factory=list)
     connections: list[Connection] = field(default_factory=list)
+
+
+# ── Synthesis dataclasses ─────────────────────────────────────────────────────
+
+@dataclass
+class CrossTheme:
+    theme: str
+    episodes: list[str]
+    synthesis: str
+
+
+@dataclass
+class RecurringClaim:
+    claim: str
+    episodes: list[str]
+    why_it_matters: str
+
+
+@dataclass
+class OpenQuestion:
+    question: str
+    context: str
+
+
+@dataclass
+class SynthesisReport:
+    date_range: str
+    episode_count: int
+    episodes_covered: list[str]
+    throughline: str
+    cross_themes: list[CrossTheme]
+    recurring_claims: list[RecurringClaim]
+    open_questions: list[OpenQuestion]
+    distilled_actions: list[str]
 
 
 @dataclass

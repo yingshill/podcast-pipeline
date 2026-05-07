@@ -70,6 +70,73 @@ _TS_RE = re.compile(r"[\[(](\d{1,2}):(\d{2})(?::(\d{2}))?[\])]")
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def scrape_episode_metadata(url: str) -> dict:
+    """Scrape episode title, show name, and guest info from page meta tags and JSON-LD.
+    Returns a flat dict of whatever fields were found. Never raises.
+    """
+    if _youtube_video_id(url):
+        return {}
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as exc:
+        log.warning("Metadata scrape failed for %s: %s", url, exc)
+        return {}
+
+    meta: dict = {}
+
+    for og_prop, key in [
+        ("og:title",       "og_title"),
+        ("og:site_name",   "og_site_name"),
+        ("og:description", "og_description"),
+    ]:
+        tag = soup.find("meta", property=og_prop)
+        if tag and tag.get("content"):
+            meta[key] = tag["content"].strip()
+
+    title_tag = soup.find("title")
+    if title_tag:
+        meta["page_title"] = title_tag.get_text(strip=True)
+
+    import json as _json
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = _json.loads(script.string or "")
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            dtype = data.get("@type", "")
+            if dtype in ("PodcastEpisode", "Episode", "Article", "NewsArticle", "WebPage"):
+                if data.get("name"):
+                    meta["jsonld_name"] = data["name"]
+                if data.get("description"):
+                    meta["jsonld_description"] = str(data["description"])[:300]
+                author = data.get("author") or data.get("creator")
+                if isinstance(author, dict):
+                    meta["jsonld_author"] = author.get("name", "")
+                elif isinstance(author, list) and author:
+                    meta["jsonld_author"] = ", ".join(
+                        a.get("name", "") for a in author if isinstance(a, dict)
+                    )
+                series = data.get("partOfSeries") or data.get("partOf")
+                if isinstance(series, dict) and series.get("name"):
+                    meta["jsonld_series"] = series["name"]
+                break
+        except Exception:
+            pass
+
+    # Strip " | Site Name" / " - Site Name" suffix from og_title when we have og_site_name
+    if meta.get("og_title") and meta.get("og_site_name"):
+        site = meta["og_site_name"]
+        for sep in (f" | {site}", f" - {site}", f" — {site}"):
+            if meta["og_title"].endswith(sep):
+                meta["og_title"] = meta["og_title"][: -len(sep)].strip()
+                break
+
+    log.info("Scraped metadata for %s: fields=%s", url, list(meta.keys()))
+    return meta
+
+
 def transcribe(url: str) -> tuple[list[TranscriptSegment], str]:
     """
     Route URL to the appropriate scraper.

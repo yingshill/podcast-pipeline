@@ -3,19 +3,24 @@
 Podcast Digest Pipeline — CLI entry point.
 
 Commands:
-  run <url>         Full pipeline (pauses for human annotation step)
-  resume <job_id>   Resume a failed or interrupted job
-  status <job_id>   Show job state
-  list              Show all jobs
-  scrape <url>      Stage 1 only: transcribe and exit
-  create-doc <id>   Stage 2 only: create Google Doc for a job
-  analyze <id>      Stage 3+4: read annotations and write Notion report
+  run <url>          Full pipeline (pauses for human annotation step)
+  resume <job_id>    Resume a failed or interrupted job
+  status <job_id>    Show job state
+  list               Show all jobs
+  scrape <url>       Stage 1 only: transcribe and exit
+  analyze-doc <id>   Analyze an existing Google Doc and write Notion report
+  clean <job_id>     Delete cached files to force fresh re-analysis
+  eval <job_id>           Interactively rate a completed report
+  eval-history            Show eval scores across all past runs
+  synthesize [--weeks N]  Cross-episode synthesis: themes, claims, open questions
 """
 from __future__ import annotations
 import json
 import logging
+import logging.handlers
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import click
@@ -39,7 +44,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler("pipeline.log"),
+        logging.handlers.RotatingFileHandler(
+            "pipeline.log", maxBytes=5 * 1024 * 1024, backupCount=3
+        ),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -73,7 +80,8 @@ def stage_scrape(job: PipelineJob) -> None:
     job.status = PipelineStatus.SCRAPING
     state_mod.save_job(job)
 
-    segments, aai_id = scraper.transcribe(job.url)
+    with console.status("[dim]Transcribing…[/dim]", spinner="dots"):
+        segments, aai_id = scraper.transcribe(job.url)
     job.assemblyai_id = aai_id
     job.status = PipelineStatus.SCRAPED
     state_mod.save_job(job)
@@ -143,8 +151,23 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     context_map = ann_mod.build_context_map(annotated_segs, job.doc_id)
     podcast_title = _title_from_url(job.url)
 
-    # Single Notion search for topic hub + recent entries
-    topic_hub, recent_entries = notion_writer.fetch_notion_context()
+    # Parallel I/O: Notion context, DB options, and episode metadata simultaneously
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_ctx  = pool.submit(notion_writer.fetch_notion_context)
+        f_opts = pool.submit(notion_writer.fetch_db_options)
+        f_meta = pool.submit(scraper.scrape_episode_metadata, job.url)
+        topic_hub, recent_entries = f_ctx.result()
+        db_options                = f_opts.result()
+        episode_metadata          = f_meta.result()
+
+    # Prefer scraped metadata title over URL slug
+    scraped_title = (
+        episode_metadata.get("jsonld_name") or
+        episode_metadata.get("og_title") or
+        ""
+    ).strip()
+    if scraped_title:
+        podcast_title = scraped_title
 
     # Use cached report if analysis already completed (avoids re-paying Claude on Notion retry)
     cached = _load_cache(job.id, "report")
@@ -161,6 +184,9 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
             all_anchors=all_anchors,
             topic_hub=topic_hub,
             recent_entries=recent_entries,
+            episode_metadata=episode_metadata,
+            source_options=db_options.get("Source", []),
+            tags_options=db_options.get("Tags", []),
         )
         _save_cache(job.id, "report", dataclasses.asdict(report))
 
@@ -168,11 +194,18 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     state_mod.save_job(job)
     console.print(f"[green]✓ Analysis complete:[/green] {len(report.key_insights)} insights, {len(report.chapter_breakdown)} chapters")
 
-    # Write to Notion
+    # Write to Notion — save page_id immediately after creation so it survives append failures
     job.status = PipelineStatus.REPORTING
     state_mod.save_job(job)
 
-    page_id, page_url = notion_writer.write_report(report, topic_hub=topic_hub)
+    def _on_page_created(page_id: str, page_url: str) -> None:
+        job.notion_page_id = page_id
+        job.notion_page_url = page_url
+        state_mod.save_job(job)
+
+    page_id, page_url = notion_writer.write_report(
+        report, topic_hub=topic_hub, on_page_created=_on_page_created,
+    )
     job.notion_page_id = page_id
     job.notion_page_url = page_url
     job.status = PipelineStatus.COMPLETED
@@ -244,6 +277,16 @@ def resume(job_id: str):
         if job.status in (PipelineStatus.AWAITING_ANNOTATION, PipelineStatus.ANALYZING, PipelineStatus.ANALYZED):
             stage_analyze_and_report(job)
 
+        if job.status == PipelineStatus.REPORTING:
+            if job.notion_page_id:
+                console.print(f"[yellow]Notion page was created but block appending may have failed.[/yellow]")
+                console.print(f"  Page: {job.notion_page_url}")
+                console.print("  Check the page manually and re-run if content is missing.")
+                job.status = PipelineStatus.COMPLETED
+                state_mod.save_job(job)
+            else:
+                stage_analyze_and_report(job)
+
     except Exception as exc:
         job.status = PipelineStatus.FAILED
         job.error = str(exc)
@@ -274,21 +317,40 @@ def list_jobs():
     if not jobs:
         console.print("No jobs found.")
         return
+
+    eval_dir = Path(__file__).parent / "evals"
+    eval_scores: dict[str, str] = {}
+    if eval_dir.exists():
+        for f in eval_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text())
+                jid = data.get("job_id", f.stem)
+                score = data.get("overall")
+                eval_scores[jid] = str(score) if score else "—"
+            except Exception:
+                pass
+
+    _SCORE_COLOR = {"5": "bold green", "4": "green", "3": "yellow", "2": "red", "1": "red"}
+
     t = Table(show_header=True, header_style="bold")
     t.add_column("ID", style="cyan")
     t.add_column("Status")
     t.add_column("URL")
     t.add_column("Created")
+    t.add_column("Eval", justify="center")
     t.add_column("Notion")
     for j in jobs:
         color = "green" if j.status == PipelineStatus.COMPLETED else (
             "red" if j.status == PipelineStatus.FAILED else "yellow"
         )
+        score = eval_scores.get(j.id, "—")
+        sc = _SCORE_COLOR.get(score, "dim")
         t.add_row(
             j.id,
             f"[{color}]{j.status}[/{color}]",
             j.url[:50],
             j.created_at[:19],
+            f"[{sc}]{score}[/{sc}]",
             j.notion_page_url or "—",
         )
     console.print(t)
@@ -348,6 +410,70 @@ def analyze_doc(doc_id: str, url: str, title: str):
 
     console.rule("[bold green]Complete[/bold green]")
     console.print(f"Notion report: {job.notion_page_url}\n")
+
+
+@cli.command()
+@click.argument("job_id")
+def clean(job_id: str):
+    """Delete cached files for a job to force a fresh re-analysis."""
+    job = state_mod.get_job(job_id)
+    if not job:
+        console.print(f"[red]Job {job_id} not found[/red]")
+        raise SystemExit(1)
+    deleted = 0
+    for suffix in ("segments", "anchors", "report"):
+        p = _cache_path(job_id, suffix)
+        if p.exists():
+            p.unlink()
+            console.print(f"[dim]Deleted {p.name}[/dim]")
+            deleted += 1
+    if deleted:
+        console.print(f"[green]Cache cleared ({deleted} file(s))[/green]")
+        console.print(f"Run [bold]python pipeline.py resume {job_id}[/bold] to re-analyze.")
+    else:
+        console.print("[dim]No cache files found for this job.[/dim]")
+
+
+@cli.command()
+@click.option("--weeks", default=1, show_default=True, help="How many weeks back to include")
+def synthesize(weeks: int):
+    """Cross-episode synthesis: themes, recurring claims, open questions across recent episodes."""
+    import synthesizer as syn_mod
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(weeks=weeks)
+    date_range = f"{cutoff.strftime('%b %-d')} – {now.strftime('%b %-d, %Y')}"
+
+    console.print(f"\n[bold cyan]Synthesis:[/bold cyan] {date_range}\n")
+
+    with console.status("[dim]Fetching episodes from Notion…[/dim]", spinner="dots"):
+        episodes = notion_writer.fetch_recent_episodes(weeks=weeks)
+
+    if not episodes:
+        console.print(f"[yellow]No episodes found in the last {weeks} week(s).[/yellow]")
+        console.print("Try: [bold]python pipeline.py synthesize --weeks 2[/bold]")
+        raise SystemExit(0)
+
+    console.print(f"[dim]Found {len(episodes)} episode(s):[/dim]")
+    for ep in episodes:
+        show = f" ({ep['show']})" if ep.get("show") else ""
+        console.print(f"  • {ep['title']}{show}")
+    console.print()
+
+    if len(episodes) < 2:
+        console.print("[yellow]Need at least 2 episodes for synthesis. Try --weeks 2 or more.[/yellow]")
+        raise SystemExit(0)
+
+    try:
+        synthesis = syn_mod.synthesize(episodes, date_range)
+        page_id, page_url = notion_writer.write_synthesis(synthesis)
+    except Exception as exc:
+        console.print(f"\n[red]Synthesis failed:[/red] {exc}")
+        raise SystemExit(1)
+
+    console.rule("[bold green]Synthesis complete[/bold green]")
+    console.print(f"\nSynthesis page: {page_url}\n")
 
 
 @cli.command("eval-history")
