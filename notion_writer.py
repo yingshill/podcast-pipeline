@@ -8,9 +8,12 @@ Key constraints:
 """
 from __future__ import annotations
 import logging
+import mimetypes
 import os
 from datetime import date
+from pathlib import Path
 
+import requests
 from notion_client import Client
 from notion_client.errors import APIResponseError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -376,12 +379,21 @@ def _build_all_blocks(report: AnalysisReport) -> list[dict]:
     stop=stop_after_attempt(5),
     reraise=True,
 )
-def _create_page(client: Client, db_id: str, properties: dict, children: list[dict]) -> dict:
-    return client.pages.create(
-        parent={"database_id": db_id},
-        properties=properties,
-        children=children[:100],
-    )
+def _create_page(
+    client: Client,
+    db_id: str,
+    properties: dict,
+    children: list[dict],
+    cover: dict | None = None,
+) -> dict:
+    kwargs: dict = {
+        "parent": {"database_id": db_id},
+        "properties": properties,
+        "children": children[:100],
+    }
+    if cover:
+        kwargs["cover"] = cover
+    return client.pages.create(**kwargs)
 
 
 @retry(
@@ -667,16 +679,65 @@ def write_synthesis(synthesis: SynthesisReport) -> tuple[str, str]:
     return page_id, page_url
 
 
+def upload_cover(image_path: str) -> str | None:
+    """Upload a local image to Notion via the file upload API.
+    Returns the file_upload_id on success, None on failure.
+    """
+    token = os.environ.get("NOTION_TOKEN")
+    path = Path(image_path)
+    if not token or not path.exists():
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": "2022-06-28",
+    }
+    content_type, _ = mimetypes.guess_type(str(path))
+    content_type = content_type or "image/jpeg"
+
+    try:
+        # Step 1: create upload session
+        resp = requests.post(
+            "https://api.notion.com/v1/file_uploads",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"name": path.name, "content_type": content_type},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        upload_id: str = data["id"]
+        upload_url: str = data["upload_url"]
+
+        # Step 2: upload file bytes as multipart
+        with path.open("rb") as fh:
+            upload_resp = requests.put(
+                upload_url,
+                headers=headers,
+                files={"file": (path.name, fh, content_type)},
+                timeout=30,
+            )
+            upload_resp.raise_for_status()
+
+        log.info("Cover uploaded to Notion: %s", upload_id)
+        return upload_id
+
+    except Exception as exc:
+        log.warning("Notion cover upload failed (non-fatal): %s", exc)
+        return None
+
+
 def write_report(
     report: AnalysisReport,
     topic_hub: dict[str, str] | None = None,
     on_page_created=None,
+    cover_path: str | None = None,
 ) -> tuple[str, str]:
     """Creates a Notion page and returns (page_id, page_url).
 
     on_page_created: optional callable(page_id, page_url) fired right after the page
     is created and before block appending begins — lets callers persist the page_id
     so a failed append can be diagnosed rather than lost.
+    cover_path: optional local image path to upload and set as the page cover.
     """
     db_id = os.environ.get("NOTION_PODCAST_ID")
     if not db_id:
@@ -686,7 +747,13 @@ def write_report(
     properties = _build_properties(report, topic_hub or {})
     all_blocks = _build_all_blocks(report)
 
-    page = _create_page(client, db_id, properties, all_blocks[:100])
+    cover: dict | None = None
+    if cover_path:
+        file_upload_id = upload_cover(cover_path)
+        if file_upload_id:
+            cover = {"type": "file_upload", "file_upload": {"id": file_upload_id}}
+
+    page = _create_page(client, db_id, properties, all_blocks[:100], cover=cover)
     page_id: str = page["id"]
     page_url: str = page.get("url", f"https://notion.so/{page_id.replace('-', '')}")
 

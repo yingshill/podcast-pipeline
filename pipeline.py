@@ -60,6 +60,9 @@ log = logging.getLogger("pipeline")
 _CACHE_DIR = Path(__file__).parent / ".cache"
 _CACHE_DIR.mkdir(exist_ok=True)
 
+_COVERS_DIR = Path(__file__).parent / "covers"
+_COVERS_DIR.mkdir(exist_ok=True)
+
 
 def _cache_path(job_id: str, suffix: str) -> Path:
     return _CACHE_DIR / f"{job_id}_{suffix}.json"
@@ -173,6 +176,18 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     if scraped_title:
         podcast_title = scraped_title
 
+    # Download cover image from og:image if available
+    cover_path: str | None = None
+    cover_url = episode_metadata.get("og_image")
+    if cover_url:
+        dest = str(_COVERS_DIR / job.id)  # extension appended by download_cover
+        if scraper.download_cover(cover_url, dest):
+            import glob
+            matches = glob.glob(f"{dest}.*")
+            cover_path = matches[0] if matches else None
+            if cover_path:
+                console.print(f"[dim]✓ Cover saved: {cover_path}[/dim]")
+
     # Use cached report if analysis already completed (avoids re-paying Claude on Notion retry)
     cached = _load_cache(job.id, "report")
     if cached:
@@ -208,7 +223,7 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
         state_mod.save_job(job)
 
     page_id, page_url = notion_writer.write_report(
-        report, topic_hub=topic_hub, on_page_created=_on_page_created,
+        report, topic_hub=topic_hub, on_page_created=_on_page_created, cover_path=cover_path,
     )
     job.notion_page_id = page_id
     job.notion_page_url = page_url

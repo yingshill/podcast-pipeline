@@ -90,6 +90,7 @@ def scrape_episode_metadata(url: str) -> dict:
         ("og:title",       "og_title"),
         ("og:site_name",   "og_site_name"),
         ("og:description", "og_description"),
+        ("og:image",       "og_image"),
     ]:
         tag = soup.find("meta", property=og_prop)
         if tag and tag.get("content"):
@@ -135,6 +136,26 @@ def scrape_episode_metadata(url: str) -> dict:
 
     log.info("Scraped metadata for %s: fields=%s", url, list(meta.keys()))
     return meta
+
+
+def download_cover(url: str, dest_path: str) -> bool:
+    """Download an image from url and save to dest_path. Returns True on success."""
+    import mimetypes
+    _EXT_ALIASES = {".jpe": ".jpg", ".jpeg": ".jpg"}
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=15)
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+        ext = mimetypes.guess_extension(content_type) or ".jpg"
+        ext = _EXT_ALIASES.get(ext, ext)
+        final_path = dest_path if dest_path.endswith(ext) else dest_path + ext
+        from pathlib import Path
+        Path(final_path).write_bytes(resp.content)
+        log.info("Cover downloaded: %s (%d bytes)", final_path, len(resp.content))
+        return True
+    except Exception as exc:
+        log.warning("Cover download failed for %s: %s", url, exc)
+        return False
 
 
 def transcribe(url: str) -> tuple[list[TranscriptSegment], str]:
