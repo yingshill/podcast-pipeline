@@ -592,6 +592,53 @@ def _build_synthesis_blocks(synthesis: SynthesisReport) -> list[dict]:
     return blocks
 
 
+def write_phrase_entries(entries: list[dict]) -> int:
+    """Write phrase entries to the Speaker Phrase Library. Returns count created."""
+    db_id = os.environ.get("NOTION_PHRASE_LIBRARY_ID")
+    if not db_id:
+        raise EnvironmentError("NOTION_PHRASE_LIBRARY_ID not set")
+
+    client = _client()
+    created = 0
+
+    for entry in entries:
+        phrase_clean = entry.get("phrase_clean") or entry.get("phrase_raw", "")
+        if not phrase_clean:
+            continue
+
+        props: dict = {
+            "Phrase (clean)": {"title": [{"text": {"content": phrase_clean[:2000]}}]},
+        }
+        if entry.get("phrase_raw"):
+            props["Phrase (raw)"] = {"rich_text": [{"text": {"content": entry["phrase_raw"][:2000]}}]}
+        if entry.get("type"):
+            props["Type"] = {"select": {"name": entry["type"]}}
+        if entry.get("function"):
+            props["Function"] = {"multi_select": [{"name": f} for f in entry["function"]]}
+        if entry.get("register"):
+            props["Register"] = {"select": {"name": entry["register"]}}
+        if entry.get("context_quote"):
+            props["Context quote"] = {"rich_text": [{"text": {"content": entry["context_quote"][:2000]}}]}
+        if entry.get("doc_url"):
+            props["Source transcript page"] = {"url": entry["doc_url"]}
+        if entry.get("meaning_en"):
+            props["Meaning (EN)"] = {"rich_text": [{"text": {"content": entry["meaning_en"][:2000]}}]}
+        if entry.get("meaning_zh"):
+            props["解释（中文）"] = {"rich_text": [{"text": {"content": entry["meaning_zh"][:2000]}}]}
+
+        try:
+            client.pages.create(
+                parent={"database_id": db_id},
+                properties=props,
+            )
+            created += 1
+        except Exception as exc:
+            log.warning("Failed to create phrase entry '%s': %s", phrase_clean[:60], exc)
+
+    log.info("Created %d phrase entries in Speaker Phrase Library", created)
+    return created
+
+
 def write_synthesis(synthesis: SynthesisReport) -> tuple[str, str]:
     """Creates a child page under NOTION_SYNTHESIS_PAGE_ID and returns (page_id, page_url)."""
     parent_id = os.environ.get("NOTION_SYNTHESIS_PAGE_ID")

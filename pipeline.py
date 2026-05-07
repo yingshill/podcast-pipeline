@@ -13,6 +13,10 @@ Commands:
   eval <job_id>           Interactively rate a completed report
   eval-history            Show eval scores across all past runs
   synthesize [--weeks N]  Cross-episode synthesis: themes, claims, open questions
+
+Phrase Library (runs automatically at end of analyze):
+  Underlined annotations → Speaker Phrase Library Notion DB
+  (classified, explained in EN + 中文, context quote attached)
 """
 from __future__ import annotations
 import json
@@ -212,6 +216,24 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     state_mod.save_job(job)
 
     console.print(f"[green]✓ Notion report created:[/green] {page_url}")
+
+    # Extract underlined phrases → Speaker Phrase Library
+    import phrase_extractor
+    underlined = [s for s in annotated_segs if s.annotation_type == "underline"]
+    if underlined:
+        try:
+            phrase_entries = phrase_extractor.extract_phrases(
+                underlines=underlined,
+                context_map=context_map,
+                podcast_title=report.podcast_title,
+                doc_url=job.doc_url,
+            )
+            count = notion_writer.write_phrase_entries(phrase_entries)
+            console.print(f"[green]✓ Phrase Library:[/green] {count}/{len(underlined)} phrases added")
+        except Exception as exc:
+            log.warning("Phrase extraction failed (non-fatal): %s", exc)
+            console.print(f"[yellow]⚠ Phrase extraction skipped:[/yellow] {exc}")
+
     console.print(f"[dim]  Run eval: python pipeline.py eval {job.id}[/dim]")
 
 
