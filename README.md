@@ -1,4 +1,7 @@
-# Podcast Digest Pipeline
+[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![Notion API](https://img.shields.io/badge/Notion_API-000?logo=notion&logoColor=white)](https://developers.notion.com)
+[![Demo](https://img.shields.io/badge/Demo-Notion_Dashboard-blue)](https://walnut-cobra-1eb.notion.site)# Podcast Digest Pipeline
 
 A CLI pipeline that turns a podcast URL into a structured Notion knowledge base entry — with phrase extraction, cross-episode synthesis, and human eval tracking.
 
