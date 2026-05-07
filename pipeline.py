@@ -307,13 +307,20 @@ def scrape(url: str):
 
 @cli.command("analyze-doc")
 @click.argument("doc_id")
-@click.option("--url", default="", help="Source URL for metadata (optional)")
+@click.option("--url", default="", help="Source URL (overrides first-line URL in the doc)")
 @click.option("--title", default="", help="Episode title (optional)")
 def analyze_doc(doc_id: str, url: str, title: str):
-    """Run analyze + Notion report stages on an existing Google Doc."""
+    """Run analyze + Notion report stages on an existing Google Doc.
+
+    Source URL is read from the first line of the doc if not passed via --url.
+    """
     doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
     podcast_title = title or f"Podcast — {doc_id[:12]}"
-    source_url = url or doc_url
+
+    source_url = url or gdocs.read_source_url(doc_id)
+    if not source_url:
+        console.print("[red]No source URL found. Add it as the first line of the Google Doc or pass --url.[/red]")
+        raise SystemExit(1)
 
     job = state_mod.create_job(source_url)
     job.doc_id = doc_id
@@ -322,7 +329,8 @@ def analyze_doc(doc_id: str, url: str, title: str):
     state_mod.save_job(job)
 
     console.print(f"\n[bold cyan]Analyze-doc job:[/bold cyan] {job.id}")
-    console.print(f"Doc: {doc_url}\n")
+    console.print(f"Doc:    {doc_url}")
+    console.print(f"Source: {source_url}\n")
 
     try:
         stage_analyze_and_report(job)

@@ -361,7 +361,6 @@ def _build_properties(report: AnalysisReport, topic_hub: dict[str, str] | None =
 def _build_all_blocks(report: AnalysisReport) -> list[dict]:
     blocks: list[dict] = []
     blocks += _consumption_guide()
-    blocks += _transcript_section(report.doc_url)
     blocks += _episode_summary_section(report.episode_summary)
     if report.concept_map:
         blocks += _concept_map_section(report.concept_map)

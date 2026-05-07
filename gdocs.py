@@ -228,6 +228,23 @@ def _label_to_ms(label: str) -> Optional[int]:
     return None
 
 
+def read_source_url(doc_id: str) -> str:
+    """Read the first non-empty line of a Google Doc and return it if it looks like a URL."""
+    docs, _ = _build_services()
+    doc = docs.documents().get(documentId=doc_id).execute()
+    for element in doc.get("body", {}).get("content", []):
+        paragraph = element.get("paragraph")
+        if not paragraph:
+            continue
+        text = "".join(
+            el.get("textRun", {}).get("content", "")
+            for el in paragraph.get("elements", [])
+        ).strip()
+        if text.startswith("http://") or text.startswith("https://"):
+            return text
+    return ""
+
+
 def nearest_anchor(time_ms: int, anchors: list[HeadingAnchor]) -> Optional[HeadingAnchor]:
     """Return the most recent heading anchor at or before the given timestamp."""
     best = None
