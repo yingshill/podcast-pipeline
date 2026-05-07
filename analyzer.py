@@ -35,9 +35,8 @@ You receive:
 ━━━ SECTION RULES ━━━
 
 source_metadata
-  Infer show, guest(s), and host from the podcast title and annotation content.
-  - source: match to the nearest option from this exact list:
-      YouTube | Latent Space | TWIML | Lex Fridman | MLOps Community | Karpathy | Stanford | Data Engineering Podcast | Other
+  Infer show, guest(s), host, and episode title from the podcast title and annotation content.
+  - episode_title: the full episode title (infer from annotations if not obvious from the podcast_title input)
   - tags: pick 1–3 most relevant from this exact list:
       agents | llm-infra | rag | eval | data-tools | skills | observability
   - eval_metric: your honest assessment, pick exactly one from this exact list:
@@ -46,6 +45,8 @@ source_metadata
       Try this week | Read deep | Bookmark | Skip
   - output: what this content could become, pick 1–3 from this exact list:
       LinkedIn Post | XHS Post | Turn into Project | Sunday Lab | Add to Zettelkasten | Share with Team | 🎨 Visualize | 📣 Project
+  - topic_hub: 1–3 topic names from the provided Topic Hub list that best match this episode's content.
+               Pick only from the exact names in the list. Empty list if none fit well.
   - core_insight: 1–2 sentences — the single most important takeaway from the episode
   - why_it_matters: 1–2 sentences — why a practitioner should care about this right now
 
@@ -64,17 +65,18 @@ chapter_breakdown
   One entry per chapter using the provided timestamp structure.
   - title: a short descriptive title (not just the timestamp label)
   - summary: exactly 2 sentences describing what was discussed in this chapter
-  - topics: 1–3 key questions or themes raised in this chapter, each with:
-      key_quote: the most precise or memorable quote from that topic
-                 (use annotated text verbatim if it falls in this chapter;
-                  otherwise reconstruct from the context provided)
+  - topics: 1–3 THEMES raised in this chapter — not one topic per annotation.
+      If multiple annotations cluster around the same idea, merge them into one
+      topic and pick the single most representative quote. Only split into separate
+      topics if the annotations are genuinely about different ideas.
+      Each topic has:
+      key_quote: the single most precise or memorable quote representing this theme
+                 (prefer annotated text verbatim; otherwise reconstruct from context)
       related_concept: the concept name from concept_map this topic connects to
                        (empty string if none)
       why_it_matters: one sentence — why a practitioner should care
       factual_anchor: any stat, study, benchmark, name-drop, or verifiable claim
                       mentioned (empty string if none)
-  For chapters that contain human annotations, the annotated text MUST appear
-  as the key_quote of the relevant topic.
 
 key_insights
   3–7 insights driven exclusively by the human's annotations.
@@ -98,10 +100,11 @@ host_questions
 ━━━ JSON SCHEMA ━━━
 {
   "source_metadata": {
+    "episode_title": "",
     "show": "",
     "guests": [],
     "host": "",
-    "source": "",
+    "topic_hub": [],
     "tags": [],
     "eval_metric": "",
     "action": "",
@@ -146,6 +149,7 @@ def _build_user_message(
     annotated: list[AnnotatedSegment],
     context_map: dict[int, str],
     all_anchors: list[HeadingAnchor],
+    topic_hub_names: list[str] | None = None,
 ) -> str:
     parts = [
         f"## Podcast: {podcast_title}",
@@ -157,6 +161,13 @@ def _build_user_message(
     for i, anchor in enumerate(all_anchors):
         end_label = all_anchors[i + 1].label if i + 1 < len(all_anchors) else "end"
         parts.append(f"  {anchor.label} – {end_label}")
+
+    if topic_hub_names:
+        parts += [
+            "",
+            "## Topic Hub (pick up to 3 that match this episode)",
+            ", ".join(topic_hub_names),
+        ]
 
     parts += [
         "",
@@ -201,6 +212,37 @@ def _call_claude(user_message: str) -> str:
     return response.content[0].text
 
 
+def _fetch_topic_names() -> list[str]:
+    """Fetch topic names from the Notion Topic Hub database."""
+    import os
+    from notion_client import Client
+    token = os.environ.get("NOTION_TOKEN")
+    if not token or not os.environ.get("NOTION_TOPIC_HUB_ID"):
+        return []
+    client = Client(auth=token)
+    names: list[str] = []
+    cursor = None
+    while True:
+        kwargs: dict = {"page_size": 100}
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        results = client.search(**kwargs)
+        for r in results.get("results", []):
+            if r.get("object") != "page":
+                continue
+            props = r.get("properties", {})
+            if "Name" not in props or "Category" not in props:
+                continue
+            name_parts = props["Name"].get("title", [])
+            name = name_parts[0].get("plain_text", "") if name_parts else ""
+            if name:
+                names.append(name)
+        if not results.get("has_more"):
+            break
+        cursor = results.get("next_cursor")
+    return sorted(names)
+
+
 def analyze(
     podcast_title: str,
     source_url: str,
@@ -214,8 +256,9 @@ def analyze(
             "No annotations found. Please highlight or underline text in the Google Doc before running analysis."
         )
 
+    topic_hub_names = _fetch_topic_names()
     log.info("Sending %d annotations to Claude (%d chapters)", len(annotated), len(all_anchors))
-    user_msg = _build_user_message(podcast_title, source_url, annotated, context_map, all_anchors)
+    user_msg = _build_user_message(podcast_title, source_url, annotated, context_map, all_anchors, topic_hub_names)
     raw = _call_claude(user_msg)
 
     raw = raw.strip()
@@ -236,6 +279,7 @@ def analyze(
         output=meta.get("output", []),
         core_insight=meta.get("core_insight", ""),
         why_it_matters=meta.get("why_it_matters", ""),
+        topic_hub=meta.get("topic_hub", []),
     )
 
     concept_map = [
@@ -278,7 +322,7 @@ def analyze(
     ]
 
     report = AnalysisReport(
-        podcast_title=podcast_title,
+        podcast_title=meta.get("episode_title") or podcast_title,
         source_url=source_url,
         doc_url=doc_url,
         source_metadata=source_metadata,

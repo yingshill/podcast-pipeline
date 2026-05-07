@@ -74,12 +74,13 @@ def _quote(text: str) -> dict:
     return {"object": "block", "type": "quote", "quote": {"rich_text": [_rt(text)]}}
 
 
-def _callout(text: str, emoji: str = "💡") -> dict:
+def _callout(text: str, emoji: str = "💡", color: str = "default") -> dict:
     return {
         "object": "block", "type": "callout",
         "callout": {
             "rich_text": [_rt(text)],
             "icon": {"type": "emoji", "emoji": emoji},
+            "color": color,
         },
     }
 
@@ -162,7 +163,7 @@ def _consumption_guide() -> list[dict]:
         "6. Chapter Detail Notes → Find the specific chapter's key quote + factual anchor\n"
         "7. Transcript → Ctrl+F for a specific phrase. This is a reference, never a starting point."
     )
-    return [_callout(guide, "⏱️"), _divider()]
+    return [_callout(guide, "⏱️", color="blue_background"), _divider()]
 
 
 def _transcript_section(doc_url: str) -> list[dict]:
@@ -217,13 +218,22 @@ def _chapter_breakdown_section(chapters: list[Chapter]) -> list[dict]:
             if topic.factual_anchor:
                 detail_children.append(_bullet(f"Factual anchor: {topic.factual_anchor}"))
 
-    toggle = _toggle("📌 Chapter & Topic Detail Notes (expand for structured drill-down)", detail_children)
+    # Notion caps toggle children at 100 — split into multiple toggles if needed
+    chunk_size = 99
+    toggles: list[dict] = []
+    for idx in range(0, len(detail_children), chunk_size):
+        chunk = detail_children[idx: idx + chunk_size]
+        label = "📌 Chapter & Topic Detail Notes (expand for structured drill-down)"
+        if len(detail_children) > chunk_size:
+            part = idx // chunk_size + 1
+            label += f" — Part {part}"
+        toggles.append(_toggle(label, chunk))
 
     return [
         _h("📑 Chapter Breakdown", level=2),
         _paragraph([_rt("Podwise-style table of contents from transcript timestamps.")]),
         summary_table,
-        toggle,
+        *toggles,
         _divider(),
     ]
 
@@ -321,27 +331,30 @@ def _source_metadata_section(report: AnalysisReport) -> list[dict]:
 
 # ── Page creation ─────────────────────────────────────────────────────────────
 
-def _build_properties(report: AnalysisReport) -> dict:
+def _build_properties(report: AnalysisReport, topic_hub: dict[str, str] | None = None) -> dict:
     meta = report.source_metadata
     props: dict = {
         "Title": {"title": [{"text": {"content": report.podcast_title}}]},
         "URL": {"url": report.source_url},
-        "Status": {"status": {"name": "Queued"}},
     }
-    if meta.source:
-        props["Source"] = {"select": {"name": meta.source}}
+    if meta.show:
+        props["Source"] = {"select": {"name": meta.show}}
     if meta.tags:
         props["Tags"] = {"multi_select": [{"name": t} for t in meta.tags]}
     if meta.eval_metric:
         props["Eval Metric"] = {"select": {"name": meta.eval_metric}}
     if meta.action:
         props["Action"] = {"select": {"name": meta.action}}
-    if meta.output:
-        props["Output"] = {"multi_select": [{"name": o} for o in meta.output]}
+    output_vals = meta.output if meta.output else ["Report"]
+    props["Output"] = {"multi_select": [{"name": o} for o in output_vals]}
     if meta.core_insight:
         props["Core Insight"] = {"rich_text": [{"text": {"content": meta.core_insight[:2000]}}]}
     if meta.why_it_matters:
         props["Why It Matters"] = {"rich_text": [{"text": {"content": meta.why_it_matters[:2000]}}]}
+    if topic_hub and meta.topic_hub:
+        ids = [{"id": topic_hub[t]} for t in meta.topic_hub if t in topic_hub]
+        if ids:
+            props["🗺️ Topic Hub"] = {"relation": ids}
     return props
 
 
@@ -388,14 +401,44 @@ def _append_blocks(client: Client, page_id: str, children: list[dict]) -> None:
     client.blocks.children.append(block_id=page_id, children=children)
 
 
+def fetch_topic_hub() -> dict[str, str]:
+    """Returns {topic_name: page_id} for all Topic Hub entries."""
+    topic_db_id = os.environ.get("NOTION_TOPIC_HUB_ID")
+    if not topic_db_id:
+        return {}
+    client = _client()
+    topics: dict[str, str] = {}
+    cursor = None
+    while True:
+        kwargs: dict = {"page_size": 100}
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        results = client.search(**kwargs)
+        for r in results.get("results", []):
+            if r.get("object") != "page":
+                continue
+            props = r.get("properties", {})
+            if "Name" not in props or "Category" not in props:
+                continue
+            name_parts = props["Name"].get("title", [])
+            name = name_parts[0].get("plain_text", "") if name_parts else ""
+            if name:
+                topics[name] = r["id"]
+        if not results.get("has_more"):
+            break
+        cursor = results.get("next_cursor")
+    return topics
+
+
 def write_report(report: AnalysisReport) -> tuple[str, str]:
     """Creates a Notion page and returns (page_id, page_url)."""
-    db_id = os.environ.get("NOTION_DATABASE_ID")
+    db_id = os.environ.get("NOTION_PODCAST_ID")
     if not db_id:
-        raise EnvironmentError("NOTION_DATABASE_ID not set")
+        raise EnvironmentError("NOTION_PODCAST_ID not set")
 
     client = _client()
-    properties = _build_properties(report)
+    topic_hub = fetch_topic_hub()
+    properties = _build_properties(report, topic_hub)
     all_blocks = _build_all_blocks(report)
 
     page = _create_page(client, db_id, properties, all_blocks[:100])

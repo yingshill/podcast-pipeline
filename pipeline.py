@@ -156,7 +156,7 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
 
     job.status = PipelineStatus.ANALYZED
     state_mod.save_job(job)
-    console.print(f"[green]✓ Analysis complete:[/green] {len(report.resonance_points)} resonance points")
+    console.print(f"[green]✓ Analysis complete:[/green] {len(report.key_insights)} insights, {len(report.chapter_breakdown)} chapters")
 
     # Write to Notion
     job.status = PipelineStatus.REPORTING
@@ -341,6 +341,28 @@ def analyze_doc(doc_id: str, url: str, title: str):
 def eval_history():
     """Show eval scores across all past report runs."""
     eval_metrics.print_history()
+
+
+@cli.command("eval")
+@click.argument("job_id")
+def run_eval(job_id: str):
+    """Interactively rate the Notion report for a completed job."""
+    import sqlite3
+    conn = sqlite3.connect(state_mod.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    conn.close()
+    if not row:
+        console.print(f"[red]Job {job_id} not found[/red]")
+        raise SystemExit(1)
+    if not row["notion_page_url"]:
+        console.print(f"[red]Job {job_id} has no Notion page yet[/red]")
+        raise SystemExit(1)
+    eval_metrics.collect_eval(
+        job_id=job_id,
+        notion_url=row["notion_page_url"],
+        source_url=row["url"],
+    )
 
 
 def _print_job(job: PipelineJob) -> None:

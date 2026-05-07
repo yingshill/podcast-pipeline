@@ -60,6 +60,7 @@ class SourceMetadata:
     output: list[str] = field(default_factory=list)  # matches Notion Output multi_select
     core_insight: str = ""
     why_it_matters: str = ""
+    topic_hub: list[str] = field(default_factory=list)
 
 
 @dataclass
