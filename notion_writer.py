@@ -695,35 +695,41 @@ def upload_cover(image_path: str) -> str | None:
     content_type, _ = mimetypes.guess_type(str(path))
     content_type = content_type or "image/jpeg"
 
-    try:
-        # Step 1: create upload session
-        resp = requests.post(
-            "https://api.notion.com/v1/file_uploads",
-            headers={**headers, "Content-Type": "application/json"},
-            json={"name": path.name, "content_type": content_type},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        upload_id: str = data["id"]
-        upload_url: str = data["upload_url"]
-
-        # Step 2: upload file bytes as multipart
-        with path.open("rb") as fh:
-            upload_resp = requests.put(
-                upload_url,
-                headers=headers,
-                files={"file": (path.name, fh, content_type)},
-                timeout=30,
+    for attempt in range(3):
+        try:
+            # Step 1: create upload session
+            resp = requests.post(
+                "https://api.notion.com/v1/file_uploads",
+                headers={**headers, "Content-Type": "application/json"},
+                json={"name": path.name, "content_type": content_type},
+                timeout=15,
             )
-            upload_resp.raise_for_status()
+            resp.raise_for_status()
+            data = resp.json()
+            upload_id: str = data["id"]
+            upload_url: str = data["upload_url"]
 
-        log.info("Cover uploaded to Notion: %s", upload_id)
-        return upload_id
+            # Step 2: upload file bytes as multipart (Notion uses POST to /send endpoint)
+            with path.open("rb") as fh:
+                upload_resp = requests.post(
+                    upload_url,
+                    headers=headers,
+                    files={"file": (path.name, fh, content_type)},
+                    timeout=30,
+                )
+                upload_resp.raise_for_status()
 
-    except Exception as exc:
-        log.warning("Notion cover upload failed (non-fatal): %s", exc)
-        return None
+            log.info("Cover uploaded to Notion: %s", upload_id)
+            return upload_id
+
+        except requests.exceptions.SSLError as exc:
+            log.warning("Cover upload SSL error (attempt %d/3): %s", attempt + 1, exc)
+            if attempt == 2:
+                log.warning("Notion cover upload failed after retries (non-fatal)")
+                return None
+        except Exception as exc:
+            log.warning("Notion cover upload failed (non-fatal): %s", exc)
+            return None
 
 
 def write_report(
