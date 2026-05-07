@@ -4,7 +4,12 @@ credentials/
 
 # Pipeline runtime
 .cache/
+covers/
+pipeline_state.db
 pipeline.log
+
+# Claude Code internal
+.claude/
 
 # Python
 __pycache__/
@@ -18,5 +23,6 @@ venv/
 
 # OS
 .DS_Store
+*.zip
 
 evals/
