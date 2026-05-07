@@ -15,7 +15,7 @@ from notion_client import Client
 from notion_client.errors import APIResponseError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from models import AnalysisReport, Chapter, ConceptCard, KeyInsight, HostQuestion
+from models import AnalysisReport, Chapter, ConceptCard, KeyInsight, HostQuestion, Connection
 
 log = logging.getLogger(__name__)
 
@@ -303,17 +303,15 @@ def _your_reflection_section(insights: list[KeyInsight]) -> list[dict]:
     return blocks
 
 
-def _connects_to_section() -> list[dict]:
-    return [
-        _h("🔗 Connects To", level=2),
-        _callout("Agent-filled section. Brainstorm will propose connections after reading transcript. Do not fill manually.", "🤖"),
-        _paragraph([_rt("Pending review — agent will propose connections after reading transcript.")]),
-        _bullet("Related entry in this DB: (pending)"),
-        _bullet("Related Project: (pending)"),
-        _bullet("Contradicts or extends: (pending)"),
-        _bullet("Updates mental model: (pending)"),
-        _divider(),
-    ]
+def _connects_to_section(connections: list[Connection]) -> list[dict]:
+    blocks: list[dict] = [_h("🔗 Connects To", level=2)]
+    if connections:
+        for c in connections:
+            blocks.append(_bullet(f"{c.relationship.title()} — {c.title}: {c.reason}"))
+    else:
+        blocks.append(_paragraph([_rt("No connections identified.")]))
+    blocks.append(_divider())
+    return blocks
 
 
 def _source_metadata_section(report: AnalysisReport) -> list[dict]:
@@ -371,7 +369,7 @@ def _build_all_blocks(report: AnalysisReport) -> list[dict]:
     if report.host_questions:
         blocks += _host_questions_section(report.host_questions)
     blocks += _your_reflection_section(report.key_insights)
-    blocks += _connects_to_section()
+    blocks += _connects_to_section(report.connections)
     blocks += _source_metadata_section(report)
     return blocks
 
@@ -400,44 +398,62 @@ def _append_blocks(client: Client, page_id: str, children: list[dict]) -> None:
     client.blocks.children.append(block_id=page_id, children=children)
 
 
-def fetch_topic_hub() -> dict[str, str]:
-    """Returns {topic_name: page_id} for all Topic Hub entries."""
-    topic_db_id = os.environ.get("NOTION_TOPIC_HUB_ID")
-    if not topic_db_id:
-        return {}
+def fetch_notion_context() -> tuple[dict[str, str], list[dict]]:
+    """Single paginated search returning (topic_hub, recent_podcast_entries).
+
+    topic_hub: {topic_name: page_id}
+    recent_podcast_entries: [{title, url, core_insight}] — up to 30 most recent
+    """
     client = _client()
-    topics: dict[str, str] = {}
+    topic_hub: dict[str, str] = {}
+    podcast_entries: list[dict] = []
     cursor = None
+
     while True:
         kwargs: dict = {"page_size": 100}
         if cursor:
             kwargs["start_cursor"] = cursor
         results = client.search(**kwargs)
+
         for r in results.get("results", []):
             if r.get("object") != "page":
                 continue
             props = r.get("properties", {})
-            if "Name" not in props or "Category" not in props:
-                continue
-            name_parts = props["Name"].get("title", [])
-            name = name_parts[0].get("plain_text", "") if name_parts else ""
-            if name:
-                topics[name] = r["id"]
+
+            # Topic Hub entry: has Name + Category + Signal Density
+            if "Name" in props and "Category" in props and "Signal Density" in props:
+                name_parts = props["Name"].get("title", [])
+                name = name_parts[0].get("plain_text", "") if name_parts else ""
+                if name:
+                    topic_hub[name] = r["id"]
+
+            # Podcast entry: has Title + Core Insight + URL
+            elif "Title" in props and "Core Insight" in props and "URL" in props:
+                if len(podcast_entries) >= 30:
+                    continue
+                title_parts = props["Title"].get("title", [])
+                title = title_parts[0].get("plain_text", "") if title_parts else ""
+                ci_parts = props["Core Insight"].get("rich_text", [])
+                core_insight = ci_parts[0].get("plain_text", "") if ci_parts else ""
+                url = props["URL"].get("url", "") or ""
+                if title:
+                    podcast_entries.append({"title": title, "url": url, "core_insight": core_insight})
+
         if not results.get("has_more"):
             break
         cursor = results.get("next_cursor")
-    return topics
+
+    return topic_hub, podcast_entries
 
 
-def write_report(report: AnalysisReport) -> tuple[str, str]:
+def write_report(report: AnalysisReport, topic_hub: dict[str, str] | None = None) -> tuple[str, str]:
     """Creates a Notion page and returns (page_id, page_url)."""
     db_id = os.environ.get("NOTION_PODCAST_ID")
     if not db_id:
         raise EnvironmentError("NOTION_PODCAST_ID not set")
 
     client = _client()
-    topic_hub = fetch_topic_hub()
-    properties = _build_properties(report, topic_hub)
+    properties = _build_properties(report, topic_hub or {})
     all_blocks = _build_all_blocks(report)
 
     page = _create_page(client, db_id, properties, all_blocks[:100])

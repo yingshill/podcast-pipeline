@@ -101,6 +101,13 @@ class HostQuestion:
 
 
 @dataclass
+class Connection:
+    title: str
+    relationship: str   # e.g. "extends", "contradicts", "applies to"
+    reason: str         # one sentence
+
+
+@dataclass
 class AnalysisReport:
     podcast_title: str
     source_url: str
@@ -111,6 +118,7 @@ class AnalysisReport:
     chapter_breakdown: list[Chapter] = field(default_factory=list)
     key_insights: list[KeyInsight] = field(default_factory=list)
     host_questions: list[HostQuestion] = field(default_factory=list)
+    connections: list[Connection] = field(default_factory=list)
 
 
 @dataclass

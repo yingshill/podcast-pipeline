@@ -121,6 +121,7 @@ def stage_await_annotation(job: PipelineJob) -> None:
 
 
 def stage_analyze_and_report(job: PipelineJob) -> None:
+    import dataclasses
     from models import AnnotatedSegment, HeadingAnchor
 
     job.status = PipelineStatus.ANALYZING
@@ -130,7 +131,6 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     anchors = [HeadingAnchor(**a) for a in anchor_data]
 
     annotated_segs, live_anchors = ann_mod.get_annotated_segments(job.doc_id)
-    # Merge: live anchors may have more detail than cached ones
     all_anchors = live_anchors if live_anchors else anchors
 
     if not annotated_segs:
@@ -141,18 +141,28 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
         return
 
     context_map = ann_mod.build_context_map(annotated_segs, job.doc_id)
-
-    # Derive podcast title from URL (good enough for now)
     podcast_title = _title_from_url(job.url)
 
-    report = analyzer.analyze(
-        podcast_title=podcast_title,
-        source_url=job.url,
-        doc_url=job.doc_url,
-        annotated=annotated_segs,
-        context_map=context_map,
-        all_anchors=all_anchors,
-    )
+    # Single Notion search for topic hub + recent entries
+    topic_hub, recent_entries = notion_writer.fetch_notion_context()
+
+    # Use cached report if analysis already completed (avoids re-paying Claude on Notion retry)
+    cached = _load_cache(job.id, "report")
+    if cached:
+        report = analyzer.reconstruct_report(cached)
+        console.print("[dim]✓ Analysis loaded from cache[/dim]")
+    else:
+        report = analyzer.analyze(
+            podcast_title=podcast_title,
+            source_url=job.url,
+            doc_url=job.doc_url,
+            annotated=annotated_segs,
+            context_map=context_map,
+            all_anchors=all_anchors,
+            topic_hub=topic_hub,
+            recent_entries=recent_entries,
+        )
+        _save_cache(job.id, "report", dataclasses.asdict(report))
 
     job.status = PipelineStatus.ANALYZED
     state_mod.save_job(job)
@@ -162,7 +172,7 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     job.status = PipelineStatus.REPORTING
     state_mod.save_job(job)
 
-    page_id, page_url = notion_writer.write_report(report)
+    page_id, page_url = notion_writer.write_report(report, topic_hub=topic_hub)
     job.notion_page_id = page_id
     job.notion_page_url = page_url
     job.status = PipelineStatus.COMPLETED

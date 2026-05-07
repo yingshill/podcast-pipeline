@@ -180,8 +180,10 @@ def _build_insert_requests(segments: list[TranscriptSegment]) -> list[dict]:
 def _extract_heading_anchors(doc_data: dict, doc_id: str) -> list[HeadingAnchor]:
     """
     Reads heading paragraphs from the returned document and extracts
-    their headingId (which Google Docs uses in #heading=h.{id} URLs).
+    their headingId. Falls back to scanning for standalone timestamp lines
+    if no styled headings are found (e.g. manually-created docs).
     """
+    import re
     anchors: list[HeadingAnchor] = []
     body = doc_data.get("body", {}).get("content", [])
 
@@ -193,13 +195,10 @@ def _extract_heading_anchors(doc_data: dict, doc_id: str) -> list[HeadingAnchor]
         heading_id = style.get("headingId")
         if not heading_id:
             continue
-
-        # Extract text to parse the timestamp label
         text = "".join(
             e.get("textRun", {}).get("content", "")
             for e in para.get("elements", [])
         ).strip("── \n")
-
         time_ms = _label_to_ms(text)
         if time_ms is not None:
             anchors.append(HeadingAnchor(
@@ -208,6 +207,27 @@ def _extract_heading_anchors(doc_data: dict, doc_id: str) -> list[HeadingAnchor]
                 heading_id=heading_id,
                 doc_id=doc_id,
             ))
+
+    # Fallback: scan for standalone timestamp paragraphs (e.g. "[10:00]", "10:00")
+    if not anchors:
+        for element in body:
+            para = element.get("paragraph")
+            if not para:
+                continue
+            text = "".join(
+                e.get("textRun", {}).get("content", "")
+                for e in para.get("elements", [])
+            ).strip()
+            clean = re.sub(r"^[\[──\s]+|[\]──\s]+$", "", text).strip()
+            if re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", clean):
+                time_ms = _label_to_ms(clean)
+                if time_ms is not None:
+                    anchors.append(HeadingAnchor(
+                        time_ms=time_ms,
+                        label=clean,
+                        heading_id="",
+                        doc_id=doc_id,
+                    ))
 
     log.info("Extracted %d heading anchors", len(anchors))
     return anchors

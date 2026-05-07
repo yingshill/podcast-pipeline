@@ -15,7 +15,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from models import (
     AnnotatedSegment, AnalysisReport, HeadingAnchor,
     SourceMetadata, ConceptCard, Chapter, ChapterTopic,
-    KeyInsight, HostQuestion,
+    KeyInsight, HostQuestion, Connection,
 )
 
 log = logging.getLogger(__name__)
@@ -90,6 +90,13 @@ host_questions
   Assign each a category from this list:
       product | leadership | technical | personal | industry | process
 
+connections
+  If a list of recent entries is provided, identify 1–3 that genuinely connect to this episode.
+  Only include real connections — skip if nothing meaningful links.
+  - title: exact title of the related entry
+  - relationship: one of "extends", "contradicts", "applies to", "background for", "compared with"
+  - reason: one sentence explaining the specific connection
+
 ━━━ CONSTRAINTS ━━━
 - Return ONLY valid JSON. No markdown fences, no commentary outside the JSON.
 - Values for source, tags, eval_metric, action, output MUST be chosen from the exact lists above.
@@ -138,6 +145,9 @@ host_questions
   ],
   "host_questions": [
     {"question": "", "category": ""}
+  ],
+  "connections": [
+    {"title": "", "relationship": "", "reason": ""}
   ]
 }
 """
@@ -150,6 +160,7 @@ def _build_user_message(
     context_map: dict[int, str],
     all_anchors: list[HeadingAnchor],
     topic_hub_names: list[str] | None = None,
+    recent_entries: list[dict] | None = None,
 ) -> str:
     parts = [
         f"## Podcast: {podcast_title}",
@@ -168,6 +179,14 @@ def _build_user_message(
             "## Topic Hub (pick up to 3 that match this episode)",
             ", ".join(topic_hub_names),
         ]
+
+    if recent_entries:
+        parts += ["", "## Recent Entries (for Connects To — use exact titles)"]
+        for e in recent_entries:
+            line = f"- {e['title']}"
+            if e.get("core_insight"):
+                line += f" — {e['core_insight'][:120]}"
+            parts.append(line)
 
     parts += [
         "",
@@ -212,37 +231,6 @@ def _call_claude(user_message: str) -> str:
     return response.content[0].text
 
 
-def _fetch_topic_names() -> list[str]:
-    """Fetch topic names from the Notion Topic Hub database."""
-    import os
-    from notion_client import Client
-    token = os.environ.get("NOTION_TOKEN")
-    if not token or not os.environ.get("NOTION_TOPIC_HUB_ID"):
-        return []
-    client = Client(auth=token)
-    names: list[str] = []
-    cursor = None
-    while True:
-        kwargs: dict = {"page_size": 100}
-        if cursor:
-            kwargs["start_cursor"] = cursor
-        results = client.search(**kwargs)
-        for r in results.get("results", []):
-            if r.get("object") != "page":
-                continue
-            props = r.get("properties", {})
-            if "Name" not in props or "Category" not in props:
-                continue
-            name_parts = props["Name"].get("title", [])
-            name = name_parts[0].get("plain_text", "") if name_parts else ""
-            if name:
-                names.append(name)
-        if not results.get("has_more"):
-            break
-        cursor = results.get("next_cursor")
-    return sorted(names)
-
-
 def analyze(
     podcast_title: str,
     source_url: str,
@@ -250,15 +238,20 @@ def analyze(
     annotated: list[AnnotatedSegment],
     context_map: dict[int, str],
     all_anchors: list[HeadingAnchor],
+    topic_hub: dict[str, str] | None = None,
+    recent_entries: list[dict] | None = None,
 ) -> AnalysisReport:
     if not annotated:
         raise ValueError(
             "No annotations found. Please highlight or underline text in the Google Doc before running analysis."
         )
 
-    topic_hub_names = _fetch_topic_names()
+    topic_hub_names = sorted(topic_hub.keys()) if topic_hub else []
     log.info("Sending %d annotations to Claude (%d chapters)", len(annotated), len(all_anchors))
-    user_msg = _build_user_message(podcast_title, source_url, annotated, context_map, all_anchors, topic_hub_names)
+    user_msg = _build_user_message(
+        podcast_title, source_url, annotated, context_map, all_anchors,
+        topic_hub_names, recent_entries,
+    )
     raw = _call_claude(user_msg)
 
     raw = raw.strip()
@@ -321,6 +314,11 @@ def analyze(
         for q in data.get("host_questions", [])
     ]
 
+    connections = [
+        Connection(title=c["title"], relationship=c["relationship"], reason=c["reason"])
+        for c in data.get("connections", [])
+    ]
+
     report = AnalysisReport(
         podcast_title=meta.get("episode_title") or podcast_title,
         source_url=source_url,
@@ -331,6 +329,7 @@ def analyze(
         chapter_breakdown=chapter_breakdown,
         key_insights=key_insights,
         host_questions=host_questions,
+        connections=connections,
     )
 
     log.info(
@@ -338,3 +337,40 @@ def analyze(
         len(chapter_breakdown), len(key_insights), len(concept_map), len(host_questions),
     )
     return report
+
+
+def reconstruct_report(data: dict) -> AnalysisReport:
+    """Reconstruct an AnalysisReport from a cached dataclasses.asdict() dict."""
+    meta = data.get("source_metadata", {})
+    source_metadata = SourceMetadata(
+        show=meta.get("show", ""),
+        guests=meta.get("guests", []),
+        host=meta.get("host", ""),
+        source=meta.get("source", ""),
+        tags=meta.get("tags", []),
+        eval_metric=meta.get("eval_metric", ""),
+        action=meta.get("action", ""),
+        output=meta.get("output", []),
+        core_insight=meta.get("core_insight", ""),
+        why_it_matters=meta.get("why_it_matters", ""),
+        topic_hub=meta.get("topic_hub", []),
+    )
+    return AnalysisReport(
+        podcast_title=data["podcast_title"],
+        source_url=data["source_url"],
+        doc_url=data["doc_url"],
+        source_metadata=source_metadata,
+        episode_summary=data.get("episode_summary", ""),
+        concept_map=[ConceptCard(**c) for c in data.get("concept_map", [])],
+        chapter_breakdown=[
+            Chapter(
+                start=ch["start"], end=ch["end"],
+                title=ch["title"], summary=ch["summary"],
+                topics=[ChapterTopic(**t) for t in ch.get("topics", [])],
+            )
+            for ch in data.get("chapter_breakdown", [])
+        ],
+        key_insights=[KeyInsight(**i) for i in data.get("key_insights", [])],
+        host_questions=[HostQuestion(**q) for q in data.get("host_questions", [])],
+        connections=[Connection(**c) for c in data.get("connections", [])],
+    )

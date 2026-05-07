@@ -79,11 +79,18 @@ def get_job(job_id: str) -> Optional[PipelineJob]:
         row = con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
     if not row:
         return None
-    return PipelineJob(**dict(row), status=PipelineStatus(row["status"]))
+    d = dict(row)
+    d["status"] = PipelineStatus(d["status"])
+    return PipelineJob(**d)
 
 
 def list_jobs() -> list[PipelineJob]:
     init_db()
     with _conn() as con:
         rows = con.execute("SELECT * FROM jobs ORDER BY created_at DESC").fetchall()
-    return [PipelineJob(**dict(r), status=PipelineStatus(r["status"])) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["status"] = PipelineStatus(d["status"])
+        result.append(PipelineJob(**d))
+    return result
