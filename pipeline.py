@@ -179,12 +179,7 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     state_mod.save_job(job)
 
     console.print(f"[green]✓ Notion report created:[/green] {page_url}")
-
-    eval_metrics.collect_eval(
-        job_id=job.id,
-        notion_url=page_url,
-        source_url=job.url,
-    )
+    console.print(f"[dim]  Run eval: python pipeline.py eval {job.id}[/dim]")
 
 
 def _title_from_url(url: str) -> str:
