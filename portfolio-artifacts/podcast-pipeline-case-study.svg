@@ -1,0 +1,32 @@
+<svg width="1600" height="900" viewBox="0 0 1600 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1600" height="900" fill="#F6F7FB"/>
+  <rect x="88" y="72" width="1424" height="756" rx="24" fill="#FFFFFF" stroke="#D8DEE9" stroke-width="2"/>
+  <rect x="128" y="112" width="1344" height="202" rx="18" fill="#111827"/>
+  <text x="168" y="164" fill="#9CA3AF" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing="2">CASE STUDY / PODCAST PIPELINE</text>
+  <text x="168" y="232" fill="#FFFFFF" font-family="Arial, Helvetica, sans-serif" font-size="60" font-weight="800">Turning listening into searchable memory</text>
+  <text x="168" y="284" fill="#CBD5E1" font-family="Arial, Helvetica, sans-serif" font-size="27">The system converts long-form audio into a structured Notion knowledge base.</text>
+  <rect x="128" y="370" width="380" height="198" rx="18" fill="#FFFFFF" stroke="#D8DEE9" stroke-width="2"/>
+  <text x="168" y="428" fill="#B91C1C" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="800">PROBLEM</text>
+  <text x="168" y="480" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-size="31" font-weight="800">Insights disappear</text>
+  <text x="168" y="526" fill="#4B5563" font-family="Arial, Helvetica, sans-serif" font-size="24">Good quotes and concepts get lost</text>
+  <text x="168" y="560" fill="#4B5563" font-family="Arial, Helvetica, sans-serif" font-size="24">after the episode ends.</text>
+  <rect x="610" y="370" width="380" height="198" rx="18" fill="#FFFFFF" stroke="#D8DEE9" stroke-width="2"/>
+  <text x="650" y="428" fill="#2563EB" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="800">SYSTEM</text>
+  <text x="650" y="480" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-size="31" font-weight="800">CLI extraction</text>
+  <text x="650" y="526" fill="#4B5563" font-family="Arial, Helvetica, sans-serif" font-size="24">The pipeline extracts phrases,</text>
+  <text x="650" y="560" fill="#4B5563" font-family="Arial, Helvetica, sans-serif" font-size="24">themes, and episode digests.</text>
+  <rect x="1092" y="370" width="380" height="198" rx="18" fill="#F0FDF4" stroke="#BBF7D0" stroke-width="2"/>
+  <text x="1132" y="428" fill="#15803D" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="800">OUTCOME</text>
+  <text x="1132" y="480" fill="#14532D" font-family="Arial, Helvetica, sans-serif" font-size="31" font-weight="800">Reusable knowledge</text>
+  <text x="1132" y="526" fill="#166534" font-family="Arial, Helvetica, sans-serif" font-size="24">The result is searchable, scored,</text>
+  <text x="1132" y="560" fill="#166534" font-family="Arial, Helvetica, sans-serif" font-size="24">and ready for future writing.</text>
+  <rect x="128" y="636" width="424" height="122" rx="18" fill="#F8FAFC" stroke="#D8DEE9" stroke-width="2"/>
+  <text x="168" y="696" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="800">Phrase extraction</text>
+  <text x="168" y="734" fill="#64748B" font-family="Arial, Helvetica, sans-serif" font-size="23">Quotes become reusable assets.</text>
+  <rect x="588" y="636" width="424" height="122" rx="18" fill="#F8FAFC" stroke="#D8DEE9" stroke-width="2"/>
+  <text x="628" y="696" fill="#111827" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="800">Cross-episode view</text>
+  <text x="628" y="734" fill="#64748B" font-family="Arial, Helvetica, sans-serif" font-size="23">Themes can be tracked over time.</text>
+  <rect x="1048" y="636" width="424" height="122" rx="18" fill="#ECFDF5" stroke="#BBF7D0" stroke-width="2"/>
+  <text x="1088" y="696" fill="#14532D" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="800">Human scoring</text>
+  <text x="1088" y="734" fill="#166534" font-family="Arial, Helvetica, sans-serif" font-size="23">Quality stays inspectable.</text>
+</svg>
