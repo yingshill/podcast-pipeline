@@ -22,6 +22,15 @@ MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8000
 BATCH_SIZE = 10
 
+_anthropic: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _anthropic
+    if _anthropic is None:
+        _anthropic = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    return _anthropic
+
 _SYSTEM = """\
 You are a phrase extraction and classification assistant for public speaking and interview preparation.
 
@@ -112,11 +121,16 @@ def _build_user_message(
     reraise=True,
 )
 def _call_claude(user_message: str) -> str:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=_SYSTEM,
+        system=[
+            {
+                "type": "text",
+                "text": _SYSTEM,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         messages=[{"role": "user", "content": user_message}],
     )
     return response.content[0].text

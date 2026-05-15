@@ -14,9 +14,12 @@ Speaker labels:
   - HTML: parsed from common podcast transcript formats (bold name, colon-delimited, etc.)
 """
 from __future__ import annotations
+import json
 import logging
+import mimetypes
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -77,7 +80,7 @@ def scrape_episode_metadata(url: str) -> dict:
     if _youtube_video_id(url):
         return {}
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=15)
+        resp = requests.get(url, headers=_HEADERS, timeout=30)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
     except Exception as exc:
@@ -100,10 +103,9 @@ def scrape_episode_metadata(url: str) -> dict:
     if title_tag:
         meta["page_title"] = title_tag.get_text(strip=True)
 
-    import json as _json
     for script in soup.find_all("script", type="application/ld+json"):
         try:
-            data = _json.loads(script.string or "")
+            data = json.loads(script.string or "")
             if isinstance(data, list):
                 data = data[0] if data else {}
             dtype = data.get("@type", "")
@@ -138,10 +140,11 @@ def scrape_episode_metadata(url: str) -> dict:
     return meta
 
 
+_EXT_ALIASES = {".jpe": ".jpg", ".jpeg": ".jpg"}
+
+
 def download_cover(url: str, dest_path: str) -> bool:
     """Download an image from url and save to dest_path. Returns True on success."""
-    import mimetypes
-    _EXT_ALIASES = {".jpe": ".jpg", ".jpeg": ".jpg"}
     try:
         resp = requests.get(url, headers=_HEADERS, timeout=15)
         resp.raise_for_status()
@@ -149,7 +152,6 @@ def download_cover(url: str, dest_path: str) -> bool:
         ext = mimetypes.guess_extension(content_type) or ".jpg"
         ext = _EXT_ALIASES.get(ext, ext)
         final_path = dest_path if dest_path.endswith(ext) else dest_path + ext
-        from pathlib import Path
         Path(final_path).write_bytes(resp.content)
         log.info("Cover downloaded: %s (%d bytes)", final_path, len(resp.content))
         return True

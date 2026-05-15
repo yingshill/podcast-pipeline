@@ -19,6 +19,15 @@ _console = _Console()
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 4000
 
+_anthropic: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _anthropic
+    if _anthropic is None:
+        _anthropic = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    return _anthropic
+
 _SYSTEM = """\
 You are a knowledge synthesis expert. You receive structured data from multiple recent podcast
 episodes and identify the patterns, recurring themes, and open questions that span across them.
@@ -105,8 +114,7 @@ def _build_user_message(episodes: list[dict], date_range: str) -> str:
     reraise=True,
 )
 def _call_claude(user_message: str) -> str:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=_SYSTEM,

@@ -8,7 +8,7 @@ Commands:
   status <job_id>    Show job state
   list               Show all jobs
   scrape <url>       Stage 1 only: transcribe and exit
-  analyze-doc <id>   Analyze an existing Google Doc and write Notion report
+  analyze-doc <id>   Auto-generate Notion notebook from transcript (no annotations needed)
   clean <job_id>     Delete cached files to force fresh re-analysis
   eval <job_id>           Interactively rate a completed report
   eval-history            Show eval scores across all past runs
@@ -19,6 +19,7 @@ Phrase Library (runs automatically at end of analyze):
   (classified, explained in EN + 中文, context quote attached)
 """
 from __future__ import annotations
+import glob
 import json
 import logging
 import logging.handlers
@@ -182,7 +183,6 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
     if cover_url:
         dest = str(_COVERS_DIR / job.id)  # extension appended by download_cover
         if scraper.download_cover(cover_url, dest):
-            import glob
             matches = glob.glob(f"{dest}.*")
             cover_path = matches[0] if matches else None
             if cover_path:
@@ -249,6 +249,96 @@ def stage_analyze_and_report(job: PipelineJob) -> None:
             log.warning("Phrase extraction failed (non-fatal): %s", exc)
             console.print(f"[yellow]⚠ Phrase extraction skipped:[/yellow] {exc}")
 
+    console.print(f"[dim]  Run eval: python pipeline.py eval {job.id}[/dim]")
+
+
+def stage_analyze_transcript(job: PipelineJob) -> None:
+    """Analyze a full Google Doc transcript (no annotations required) and write Notion report."""
+    import dataclasses
+
+    job.status = PipelineStatus.ANALYZING
+    state_mod.save_job(job)
+
+    # Read full transcript from the Google Doc
+    transcript_text = gdocs.read_full_text(job.doc_id)
+    if not transcript_text.strip():
+        console.print("[red]No transcript text found in the Google Doc.[/red]")
+        job.status = PipelineStatus.AWAITING_ANNOTATION  # Reuse status, meaning "awaiting content"
+        state_mod.save_job(job)
+        return
+
+    podcast_title = _title_from_url(job.url)
+
+    # Parallel I/O: Notion context, DB options, and episode metadata simultaneously
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_ctx  = pool.submit(notion_writer.fetch_notion_context)
+        f_opts = pool.submit(notion_writer.fetch_db_options)
+        f_meta = pool.submit(scraper.scrape_episode_metadata, job.url)
+        topic_hub, recent_entries = f_ctx.result()
+        db_options                = f_opts.result()
+        episode_metadata          = f_meta.result()
+
+    # Prefer scraped metadata title over URL slug
+    scraped_title = (
+        episode_metadata.get("jsonld_name") or
+        episode_metadata.get("og_title") or
+        ""
+    ).strip()
+    if scraped_title:
+        podcast_title = scraped_title
+
+    # Download cover image from og:image if available
+    cover_path: str | None = None
+    cover_url = episode_metadata.get("og_image")
+    if cover_url:
+        dest = str(_COVERS_DIR / job.id)  # extension appended by download_cover
+        if scraper.download_cover(cover_url, dest):
+            matches = glob.glob(f"{dest}.*")
+            cover_path = matches[0] if matches else None
+            if cover_path:
+                console.print(f"[dim]✓ Cover saved: {cover_path}[/dim]")
+
+    # Use cached report if analysis already completed (avoids re-paying Claude on Notion retry)
+    cached = _load_cache(job.id, "report")
+    if cached:
+        report = analyzer.reconstruct_report(cached)
+        console.print("[dim]✓ Analysis loaded from cache[/dim]")
+    else:
+        report = analyzer.analyze_from_transcript(
+            podcast_title=podcast_title,
+            source_url=job.url,
+            doc_url=job.doc_url,
+            transcript_text=transcript_text,
+            topic_hub=topic_hub,
+            recent_entries=recent_entries,
+            episode_metadata=episode_metadata,
+            source_options=db_options.get("Source", []),
+            tags_options=db_options.get("Tags", []),
+        )
+        _save_cache(job.id, "report", dataclasses.asdict(report))
+
+    job.status = PipelineStatus.ANALYZED
+    state_mod.save_job(job)
+    console.print(f"[green]✓ Analysis complete:[/green] {len(report.key_insights)} insights, {len(report.chapter_breakdown)} chapters")
+
+    # Write to Notion — save page_id immediately after creation so it survives append failures
+    job.status = PipelineStatus.REPORTING
+    state_mod.save_job(job)
+
+    def _on_page_created(page_id: str, page_url: str) -> None:
+        job.notion_page_id = page_id
+        job.notion_page_url = page_url
+        state_mod.save_job(job)
+
+    page_id, page_url = notion_writer.write_report(
+        report, topic_hub=topic_hub, on_page_created=_on_page_created, cover_path=cover_path,
+    )
+    job.notion_page_id = page_id
+    job.notion_page_url = page_url
+    job.status = PipelineStatus.COMPLETED
+    state_mod.save_job(job)
+
+    console.print(f"[green]✓ Notion report created:[/green] {page_url}")
     console.print(f"[dim]  Run eval: python pipeline.py eval {job.id}[/dim]")
 
 
@@ -410,14 +500,35 @@ def scrape(url: str):
 
 
 @cli.command("analyze-doc")
-@click.argument("doc_id")
-@click.option("--url", default="", help="Source URL (overrides first-line URL in the doc)")
+@click.argument("doc_id_or_url")
+@click.option("--url", default="", help="Episode URL (overrides first-line URL in the doc)")
 @click.option("--title", default="", help="Episode title (optional)")
-def analyze_doc(doc_id: str, url: str, title: str):
-    """Run analyze + Notion report stages on an existing Google Doc.
+def analyze_doc(doc_id_or_url: str, url: str, title: str):
+    """Auto-generate a Notion notebook from a transcript Google Doc (no annotations required).
 
-    Source URL is read from the first line of the doc if not passed via --url.
+    Args:
+        doc_id_or_url: Google Doc ID or full URL (https://docs.google.com/document/d/...)
+
+    The doc should:
+    1. Have the episode URL as the first line (for cover image and metadata)
+    2. Contain the full transcript (highlights optional; full text is analyzed)
+
+    The episode URL is read from the doc's first line, or overridden via --url.
+    Generates: Episode Summary, Concept Map, Chapter Breakdown, Key Insights, Host Questions,
+    Your Reflection template, Connects To, and Source Metadata sections.
     """
+    import re
+
+    # Extract doc ID from URL if needed
+    doc_id = doc_id_or_url
+    if "docs.google.com" in doc_id_or_url:
+        match = re.search(r"/d/([a-zA-Z0-9-_]+)", doc_id_or_url)
+        if match:
+            doc_id = match.group(1)
+        else:
+            console.print("[red]Invalid Google Doc URL[/red]")
+            raise SystemExit(1)
+
     doc_url = f"https://docs.google.com/document/d/{doc_id}/edit"
     podcast_title = title or f"Podcast — {doc_id[:12]}"
 
@@ -437,7 +548,7 @@ def analyze_doc(doc_id: str, url: str, title: str):
     console.print(f"Source: {source_url}\n")
 
     try:
-        stage_analyze_and_report(job)
+        stage_analyze_transcript(job)
     except Exception as exc:
         job.status = PipelineStatus.FAILED
         job.error = str(exc)
@@ -447,6 +558,8 @@ def analyze_doc(doc_id: str, url: str, title: str):
 
     console.rule("[bold green]Complete[/bold green]")
     console.print(f"Notion report: {job.notion_page_url}\n")
+
+
 
 
 @cli.command()
@@ -523,21 +636,17 @@ def eval_history():
 @click.argument("job_id")
 def run_eval(job_id: str):
     """Interactively rate the Notion report for a completed job."""
-    import sqlite3
-    conn = sqlite3.connect(state_mod.DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    conn.close()
-    if not row:
+    job = state_mod.get_job(job_id)
+    if not job:
         console.print(f"[red]Job {job_id} not found[/red]")
         raise SystemExit(1)
-    if not row["notion_page_url"]:
+    if not job.notion_page_url:
         console.print(f"[red]Job {job_id} has no Notion page yet[/red]")
         raise SystemExit(1)
     eval_metrics.collect_eval(
         job_id=job_id,
-        notion_url=row["notion_page_url"],
-        source_url=row["url"],
+        notion_url=job.notion_page_url,
+        source_url=job.url,
     )
 
 

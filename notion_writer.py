@@ -27,12 +27,17 @@ log = logging.getLogger(__name__)
 
 BLOCK_CHAR_LIMIT = 1900
 
+_notion: Client | None = None
+
 
 def _client() -> Client:
-    token = os.environ.get("NOTION_TOKEN")
-    if not token:
-        raise EnvironmentError("NOTION_TOKEN not set")
-    return Client(auth=token)
+    global _notion
+    if _notion is None:
+        token = os.environ.get("NOTION_TOKEN")
+        if not token:
+            raise EnvironmentError("NOTION_TOKEN not set")
+        _notion = Client(auth=token)
+    return _notion
 
 
 # ── Primitive block builders ──────────────────────────────────────────────────
@@ -331,19 +336,22 @@ def _build_properties(report: AnalysisReport, topic_hub: dict[str, str] | None =
     meta = report.source_metadata
     props: dict = {
         "Title": {"title": [{"text": {"content": report.podcast_title}}]},
-        "URL": {"url": report.source_url},
-        "Transcript": {"url": report.doc_url},
+        "Episode": {"url": report.source_url},  # Episode URL
     }
+    # Add Transcript Doc (Google Doc link)
+    if report.doc_url:
+        props["Transcript Doc"] = {"url": report.doc_url}
+    # Set Action to "Read Deep" by default
+    props["Action"] = {"select": {"name": "Read Deep"}}
+    # Set Output to "Report" only
+    props["Output"] = {"multi_select": [{"name": "Report"}]}
+
     if meta.show:
         props["Source"] = {"select": {"name": meta.show}}
     if meta.tags:
         props["Tags"] = {"multi_select": [{"name": t} for t in meta.tags]}
     if meta.eval_metric:
         props["Eval Metric"] = {"select": {"name": meta.eval_metric}}
-    if meta.action:
-        props["Action"] = {"select": {"name": meta.action}}
-    output_vals = list(dict.fromkeys(["Report"] + (meta.output or [])))
-    props["Output"] = {"multi_select": [{"name": o} for o in output_vals]}
     if meta.core_insight:
         props["Core Insight"] = {"rich_text": [{"text": {"content": meta.core_insight[:2000]}}]}
     if meta.why_it_matters:

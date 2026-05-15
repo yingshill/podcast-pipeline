@@ -26,14 +26,27 @@ log = logging.getLogger(__name__)
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8000
 
+_anthropic: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    global _anthropic
+    if _anthropic is None:
+        _anthropic = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    return _anthropic
+
 _SYSTEM = """\
 You are an expert podcast analyst. You generate a structured notebook entry for a human reader.
 
-You receive:
-1. Podcast title and URL
-2. Chapter structure — timestamp labels from the transcript (every ~10 min)
-3. Human-annotated passages — text the reader highlighted or underlined; these mark what personally resonated
-4. Context paragraphs surrounding each annotation
+You receive ONE of:
+A) Annotation mode:
+   1. Podcast title and URL
+   2. Chapter structure — timestamp labels from the transcript (every ~10 min)
+   3. Human-annotated passages — text the reader highlighted or underlined; these mark what personally resonated
+   4. Context paragraphs surrounding each annotation
+B) Full transcript mode:
+   1. Podcast title and URL
+   2. The complete transcript text (no annotations; analyze comprehensively)
 
 ━━━ SECTION RULES ━━━
 
@@ -233,6 +246,60 @@ def _build_user_message(
     return "\n".join(parts)
 
 
+def _build_user_message_from_transcript(
+    podcast_title: str,
+    source_url: str,
+    transcript_text: str,
+    topic_hub_names: list[str] | None = None,
+    recent_entries: list[dict] | None = None,
+    episode_metadata: dict | None = None,
+    source_options: list[str] | None = None,
+    tags_options: list[str] | None = None,
+) -> str:
+    parts = [
+        f"## Podcast: {podcast_title}",
+        f"URL: {source_url}",
+        "",
+    ]
+
+    if episode_metadata:
+        parts += ["## Episode Metadata (scraped from source URL)"]
+        for k, v in episode_metadata.items():
+            parts.append(f"  {k}: {v}")
+
+    if source_options:
+        parts += ["", "## Available Notion Source Options (pick closest or use correct show name)"]
+        parts.append(", ".join(source_options))
+
+    if tags_options:
+        parts += ["", "## Available Notion Tags (pick 1–3 or create new concise lowercase tag)"]
+        parts.append(", ".join(tags_options))
+
+    if topic_hub_names:
+        parts += [
+            "",
+            "## Topic Hub (pick up to 3 that match this episode)",
+            ", ".join(topic_hub_names),
+        ]
+
+    if recent_entries:
+        parts += ["", "## Recent Entries (for Connects To — use exact titles)"]
+        for e in recent_entries:
+            line = f"- {e['title']}"
+            if e.get("core_insight"):
+                line += f" — {e['core_insight'][:120]}"
+            parts.append(line)
+
+    parts += [
+        "",
+        "## Full Transcript (analyze comprehensively to generate all sections)",
+        "",
+        transcript_text,
+    ]
+
+    return "\n".join(parts)
+
+
 @retry(
     retry=retry_if_exception_type(anthropic.APIError),
     wait=wait_exponential(multiplier=2, min=4, max=60),
@@ -240,8 +307,7 @@ def _build_user_message(
     reraise=True,
 )
 def _call_claude(user_message: str) -> str:
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         system=[
@@ -254,6 +320,74 @@ def _call_claude(user_message: str) -> str:
         messages=[{"role": "user", "content": user_message}],
     )
     return response.content[0].text
+
+
+def _parse_response(raw: str, podcast_title: str, source_url: str, doc_url: str) -> AnalysisReport:
+    """Parse a raw Claude JSON response into an AnalysisReport."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    data = json.loads(raw)
+
+    meta = data.get("source_metadata", {})
+    source_metadata = SourceMetadata(
+        show=meta.get("show", ""),
+        guests=meta.get("guests", []),
+        host=meta.get("host", ""),
+        source=meta.get("source", "Other"),
+        tags=meta.get("tags", []),
+        eval_metric=meta.get("eval_metric", ""),
+        action=meta.get("action", ""),
+        output=meta.get("output", []),
+        core_insight=meta.get("core_insight", ""),
+        why_it_matters=meta.get("why_it_matters", ""),
+        topic_hub=meta.get("topic_hub", []),
+    )
+    concept_map = [
+        ConceptCard(concept=c["concept"], explanation=c["explanation"])
+        for c in data.get("concept_map", [])
+    ]
+    chapter_breakdown = [
+        Chapter(
+            start=ch["start"], end=ch["end"],
+            title=ch["title"], summary=ch["summary"],
+            topics=[
+                ChapterTopic(
+                    title=t["title"],
+                    key_quote=t.get("key_quote", ""),
+                    related_concept=t.get("related_concept", ""),
+                    why_it_matters=t.get("why_it_matters", ""),
+                    factual_anchor=t.get("factual_anchor", ""),
+                )
+                for t in ch.get("topics", [])
+            ],
+        )
+        for ch in data.get("chapter_breakdown", [])
+    ]
+    key_insights = [
+        KeyInsight(timestamp=i["timestamp"], quote=i["quote"], insight=i["insight"])
+        for i in data.get("key_insights", [])
+    ]
+    host_questions = [
+        HostQuestion(question=q["question"], category=q["category"], answer=q.get("answer", ""))
+        for q in data.get("host_questions", [])
+    ]
+    connections = [
+        Connection(title=c["title"], relationship=c["relationship"], reason=c["reason"])
+        for c in data.get("connections", [])
+    ]
+    return AnalysisReport(
+        podcast_title=meta.get("episode_title") or podcast_title,
+        source_url=source_url,
+        doc_url=doc_url,
+        source_metadata=source_metadata,
+        episode_summary=data.get("episode_summary", ""),
+        concept_map=concept_map,
+        chapter_breakdown=chapter_breakdown,
+        key_insights=key_insights,
+        host_questions=host_questions,
+        connections=connections,
+    )
 
 
 def analyze(
@@ -286,90 +420,48 @@ def analyze(
     with _console.status("[dim]Analyzing with Claude…[/dim]", spinner="dots"):
         raw = _call_claude(user_msg)
 
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    report = _parse_response(raw, podcast_title, source_url, doc_url)
 
-    data = json.loads(raw)
-
-    meta = data.get("source_metadata", {})
-    source_metadata = SourceMetadata(
-        show=meta.get("show", ""),
-        guests=meta.get("guests", []),
-        host=meta.get("host", ""),
-        source=meta.get("source", "Other"),
-        tags=meta.get("tags", []),
-        eval_metric=meta.get("eval_metric", ""),
-        action=meta.get("action", ""),
-        output=meta.get("output", []),
-        core_insight=meta.get("core_insight", ""),
-        why_it_matters=meta.get("why_it_matters", ""),
-        topic_hub=meta.get("topic_hub", []),
-    )
-
-    concept_map = [
-        ConceptCard(concept=c["concept"], explanation=c["explanation"])
-        for c in data.get("concept_map", [])
-    ]
-
-    chapter_breakdown = [
-        Chapter(
-            start=ch["start"],
-            end=ch["end"],
-            title=ch["title"],
-            summary=ch["summary"],
-            topics=[
-                ChapterTopic(
-                    title=t["title"],
-                    key_quote=t.get("key_quote", ""),
-                    related_concept=t.get("related_concept", ""),
-                    why_it_matters=t.get("why_it_matters", ""),
-                    factual_anchor=t.get("factual_anchor", ""),
-                )
-                for t in ch.get("topics", [])
-            ],
-        )
-        for ch in data.get("chapter_breakdown", [])
-    ]
-
-    key_insights = [
-        KeyInsight(
-            timestamp=i["timestamp"],
-            quote=i["quote"],
-            insight=i["insight"],
-        )
-        for i in data.get("key_insights", [])
-    ]
-
-    host_questions = [
-        HostQuestion(question=q["question"], category=q["category"], answer=q.get("answer", ""))
-        for q in data.get("host_questions", [])
-    ]
-
-    connections = [
-        Connection(title=c["title"], relationship=c["relationship"], reason=c["reason"])
-        for c in data.get("connections", [])
-    ]
-
-    report = AnalysisReport(
-        podcast_title=meta.get("episode_title") or podcast_title,
-        source_url=source_url,
-        doc_url=doc_url,
-        source_metadata=source_metadata,
-        episode_summary=data.get("episode_summary", ""),
-        concept_map=concept_map,
-        chapter_breakdown=chapter_breakdown,
-        key_insights=key_insights,
-        host_questions=host_questions,
-        connections=connections,
-    )
-
-    if not chapter_breakdown:
+    if not report.chapter_breakdown:
         log.warning("Claude returned 0 chapters — transcript may have no anchor timestamps or Claude truncated the response")
 
     log.info(
         "Analysis complete: %d chapters, %d insights, %d concepts, %d host questions",
-        len(chapter_breakdown), len(key_insights), len(concept_map), len(host_questions),
+        len(report.chapter_breakdown), len(report.key_insights), len(report.concept_map), len(report.host_questions),
+    )
+    return report
+
+
+def analyze_from_transcript(
+    podcast_title: str,
+    source_url: str,
+    doc_url: str,
+    transcript_text: str,
+    topic_hub: dict[str, str] | None = None,
+    recent_entries: list[dict] | None = None,
+    episode_metadata: dict | None = None,
+    source_options: list[str] | None = None,
+    tags_options: list[str] | None = None,
+) -> AnalysisReport:
+    """Analyze a full transcript without human annotations — auto-generates all notebook sections."""
+    topic_hub_names = sorted(topic_hub.keys()) if topic_hub else []
+    log.info("Analyzing transcript with Claude (%d characters)", len(transcript_text))
+
+    user_msg = _build_user_message_from_transcript(
+        podcast_title, source_url, transcript_text,
+        topic_hub_names, recent_entries,
+        episode_metadata=episode_metadata,
+        source_options=source_options,
+        tags_options=tags_options,
+    )
+    with _console.status("[dim]Analyzing with Claude…[/dim]", spinner="dots"):
+        raw = _call_claude(user_msg)
+
+    report = _parse_response(raw, podcast_title, source_url, doc_url)
+
+    log.info(
+        "Analysis complete: %d chapters, %d insights, %d concepts, %d host questions",
+        len(report.chapter_breakdown), len(report.key_insights), len(report.concept_map), len(report.host_questions),
     )
     return report
 
